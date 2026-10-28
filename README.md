@@ -16,7 +16,9 @@ Switching Ultimate to Eco also takes one reboot.
 
 ### How Eco works
 
-Eco powers the dGPU off in firmware, as G-Helper does. The plugin sets `"hotplug_type": "Asus"` in `/etc/supergfxd.conf`. With it, `supergfxd` sets `dgpu_disable=1` when it boots in `Integrated` and again after each resume, so the firmware keeps the GPU off the PCI bus across suspend. Leaving Eco, the helper writes `dgpu_disable=0` before the MUX: the kernel refuses MUX = dGPU while the dGPU is disabled, and `supergfxd` would otherwise boot back into `Integrated`. `dgpu_disable=1` is never written live.
+Eco powers the dGPU off in firmware, as G-Helper does. The plugin sets `"hotplug_type": "Asus"` in `/etc/supergfxd.conf`. With it, `supergfxd` sets `dgpu_disable=1` when it boots in `Integrated`, and its wake handler sets it again after each resume. The firmware is then expected to keep the GPU off the PCI bus across suspend; this is not yet verified on hardware. Leaving Eco, the helper writes `dgpu_disable=0` before the MUX: the kernel refuses MUX = dGPU while the dGPU is disabled, and `supergfxd` would otherwise boot back into `Integrated`.
+
+The helper never writes `dgpu_disable=1` while any NVIDIA PCI function is present. If you revert to Eco before the reboot and the GPU is still absent, it writes 1 back; otherwise the window keeps asking for a reboot. Reboot right after a switch, before suspending: on resume `supergfxd` re-disables the dGPU while it still runs Eco. If a switch still lands in Eco, the window says so; apply the mode again.
 
 Earlier versions used a sleep hook that switched to Vfio and back to Integrated after resume. On resume the firmware brings the GPU back and the desktop opens it within seconds, so the hook could not power it off safely. The hook is gone; the helper and the root install remove its old file.
 
@@ -39,6 +41,8 @@ Root step, which installs the privileged helper and the polkit action and normal
 sudo ./install-root.sh
 ```
 
+Reboot to finish (Eco uses the new firmware power-off from the next boot).
+
 The checkout is writable by your user, so anything running as you can change it. Before each `sudo` run, review what changed since you last checked, for example with `git -C <repo> log` and `git -C <repo> diff`.
 
 The root step never changes the GPU mode. It sets `"hotplug_type": "Asus"` in `/etc/supergfxd.conf`, normalises a stale `mode` so that it matches the MUX, and removes the old GPU Mode sleep hook. In Eco it also removes Omarchy's `force-igpu` sleep hook, which conflicts with the firmware-disabled dGPU. If that normalisation fails, the helper and polkit action stay installed; fix the reported problem and run the root step again, or remove it with `--remove`.
@@ -55,18 +59,26 @@ On many ASUS laptops the HDMI and USB-C DisplayPort outputs are wired to the dGP
 
 ## Recovery
 
-If a switch leaves the machine unable to boot a graphical session, edit the kernel command line from the Limine boot menu and add:
+From a TTY (Ctrl+Alt+F3), then reboot:
 
-```
-supergfxd.mode=Hybrid
-```
+- Stuck in Ultimate: set the MUX back to Optimus, or set it to Optimus/Dynamic in the BIOS.
 
-This overrides `/etc/supergfxd.conf` for that boot. Then switch to the wanted mode from the window.
+  ```
+  echo 1 | sudo tee /sys/class/firmware-attributes/asus-armoury/attributes/gpu_mux_mode/current_value
+  ```
+
+- Stuck in Eco: re-enable the dGPU, and/or set `"hotplug_type": "None"` in `/etc/supergfxd.conf` (with `None`, `supergfxd` clears `dgpu_disable` at boot and starts in Hybrid).
+
+  ```
+  echo 0 | sudo tee /sys/class/firmware-attributes/asus-armoury/attributes/dgpu_disable/current_value
+  ```
+
+Do not use `supergfxd.mode=` on the kernel command line for this. `supergfxd` writes that mode into its config permanently, with `"hotplug_type": "Asus"` and the dGPU disabled it still boots Integrated, and with the MUX on dGPU any mode becomes `AsusMuxDgpu`.
 
 ## Uninstall
 
 1. Switch to Standard or Ultimate. Eco keeps the dGPU disabled in firmware, so both remove commands refuse to run while the config is in Eco.
-2. Remove the root files, which are the helper, polkit action and drop-in, plus the old sleep hook if present:
+2. Reset `hotplug_type` to `"None"` and remove the root files, which are the helper, polkit action and drop-in, plus the old sleep hook if present. The stock `omarchy-toggle-hybrid-gpu` cannot leave Eco while `hotplug_type` is `"Asus"`, so the reset runs first:
 
    ```
    sudo ./install-root.sh --remove
@@ -79,6 +91,8 @@ This overrides `/etc/supergfxd.conf` for that boot. Then switch to the wanted mo
    ```
 
 ## Development
+
+To test suspend in Eco, use `sudo rtcwake -m no -s 60 && systemctl suspend`. `rtcwake -m mem` bypasses logind, so `supergfxd`'s wake handler does not run.
 
 ```
 python3 -I tests/test_state.py && python3 -I tests/test_apply.py && python3 -I tests/test_menu.py && node --test tests/ && bash tests/test_root_install.sh && bash tests/test_install.sh
