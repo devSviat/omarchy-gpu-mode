@@ -161,6 +161,110 @@ def test_rollback_on_failure():
     assert reloads == [1]
 
 
+def test_mux_written_when_pending_despite_readback():
+    base = fakeroot.build(conf_mode="AsusMuxDgpu", mux="1", pending="1")
+    writes = []
+    original = gm._write_mux
+    gm._write_mux = lambda path, value: writes.append(value)
+    try:
+        run_apply(base, "standard")
+    finally:
+        gm._write_mux = original
+    assert writes == ["1"]
+
+
+def test_rollback_restores_mux_even_when_readback_lies():
+    base = fakeroot.build(conf_mode="AsusMuxDgpu", mux="0")
+    original_write, lying = gm._write_mux, None
+    state = {"n": 0}
+
+    def write(path, value):
+        state["n"] += 1
+        original_write(path, value)
+        if state["n"] == 1:
+            Path(path).write_text("0")
+
+    original_atomic = gm._atomic_write
+
+    def failing(path, data, mode):
+        if str(path).endswith("supergfxd.conf") and not state.get("f"):
+            state["f"] = True
+            raise OSError("boom")
+        return original_atomic(path, data, mode)
+
+    gm._write_mux, gm._atomic_write = write, failing
+    try:
+        assert raises_apply(lambda: run_apply(base, "standard"))
+    finally:
+        gm._write_mux, gm._atomic_write = original_write, original_atomic
+    assert state["n"] == 2
+    assert mux_file(base).read_text().strip() == "0"
+
+
+def test_reload_failure_rolls_back():
+    base = fakeroot.build(conf_mode="Hybrid", mux="0")
+    paths = ("etc/supergfxd.conf", fakeroot.ARMOURY + "/gpu_mux_mode/current_value",
+             gm.HOOK_PATH, gm.DROPIN_PATH)
+    before = snap(base, *paths)
+
+    def bad():
+        raise RuntimeError("reload broke")
+
+    try:
+        gm.apply_mode(gm.Root(base), "eco", reload=bad)
+        raise AssertionError("no error")
+    except gm.ApplyError as exc:
+        assert "reload broke" in str(exc)
+    assert snap(base, *paths) == before
+
+
+def test_rollback_continues_after_mux_restore_failure():
+    base = fakeroot.build(conf_mode="Hybrid", mux="0")
+    put(base, gm.DROPIN_PATH, "old", 0o644)
+    original_write, original_atomic = gm._write_mux, gm._atomic_write
+    n = {"w": 0, "c": 0}
+
+    def write(path, value):
+        n["w"] += 1
+        if n["w"] == 2:
+            raise OSError("mux restore broke")
+        original_write(path, value)
+
+    def failing(path, data, mode):
+        if str(path).endswith("supergfxd.conf") and n["c"] == 0:
+            n["c"] = 1
+            raise OSError("conf broke")
+        return original_atomic(path, data, mode)
+
+    gm._write_mux, gm._atomic_write = write, failing
+    try:
+        gm.apply_mode(gm.Root(base), "eco")
+        raise AssertionError("no error")
+    except gm.ApplyError as exc:
+        msg = str(exc)
+    finally:
+        gm._write_mux, gm._atomic_write = original_write, original_atomic
+    assert "conf broke" in msg and "mux restore broke" in msg
+    assert Path(base, gm.DROPIN_PATH.lstrip("/")).read_text() == "old"
+    assert not Path(base, gm.HOOK_PATH.lstrip("/")).exists()
+
+
+def test_conf_mode_restored():
+    base = fakeroot.build(conf_mode="Hybrid", mux="1")
+    conf_file(base).chmod(0o600)
+    original = gm._install
+
+    def bad(*a):
+        raise OSError("x")
+
+    gm._install = bad
+    try:
+        assert raises_apply(lambda: run_apply(base, "eco"))
+    finally:
+        gm._install = original
+    assert conf_file(base).stat().st_mode & 0o777 == 0o600
+
+
 def test_idempotent():
     base = fakeroot.build(conf_mode="Hybrid", mux="1")
     run_apply(base, "eco")
