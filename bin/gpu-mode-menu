@@ -1,0 +1,109 @@
+#!/usr/bin/python3 -I
+"""Add or remove the GPU Mode row in the Omarchy menu extensions file.
+
+  gpu-mode-menu install [--file PATH]
+  gpu-mode-menu remove  [--file PATH]
+
+Plugins cannot register menu rows, so the row is a marked block in the user's
+extensions file. It redefines the stock Hybrid GPU row, which replaces that
+row whole while the block is present.
+"""
+
+import argparse
+import os
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+DEFAULT_FILE = Path.home() / ".config/omarchy/extensions/omarchy-menu.jsonc"
+BEGIN = "  // >>> sviat.gpu-mode"
+END = "  // <<< sviat.gpu-mode"
+ROW = (
+    '  "trigger.hardware.hybrid-gpu": {"icon":"","label":"GPU Mode",'
+    '"when":"omarchy-hw-hybrid-gpu",'
+    '"action":"omarchy-shell shell summon sviat.gpu-mode \'{}\'"},'
+)
+BLOCK = [BEGIN, ROW, END]
+
+
+def find_block(lines):
+    begins = [i for i, l in enumerate(lines) if l.strip() == BEGIN.strip()]
+    ends = [i for i, l in enumerate(lines) if l.strip() == END.strip()]
+    if not begins and not ends:
+        return None
+    if len(begins) != 1 or len(ends) != 1 or ends[0] < begins[0]:
+        raise SystemExit("gpu-mode-menu: malformed sviat.gpu-mode markers, fix the file by hand")
+    return begins[0], ends[0]
+
+
+def write_atomic(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+
+def backup(path):
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    bak = path.with_name(f"{path.name}.{stamp}.bak")
+    n = 0
+    while bak.exists():
+        n += 1
+        bak = path.with_name(f"{path.name}.{stamp}-{n}.bak")
+    bak.write_bytes(path.read_bytes())
+
+
+def install(path):
+    if not path.exists():
+        write_atomic(path, "\n".join(["{", *BLOCK, "}"]) + "\n")
+        return
+    text = path.read_text()
+    lines = text.split("\n")
+    found = find_block(lines)
+    if found:
+        begin, end = found
+        updated = lines[:begin] + BLOCK + lines[end + 1:]
+    else:
+        opener = next((i for i, l in enumerate(lines) if l.strip() == "{"), None)
+        if opener is None:
+            raise SystemExit("gpu-mode-menu: expected a line with a lone '{' opening the file")
+        updated = lines[: opener + 1] + BLOCK + lines[opener + 1:]
+    new_text = "\n".join(updated)
+    if new_text == text:
+        return
+    backup(path)
+    write_atomic(path, new_text)
+
+
+def remove(path):
+    if not path.exists():
+        return
+    text = path.read_text()
+    lines = text.split("\n")
+    found = find_block(lines)
+    if not found:
+        return
+    begin, end = found
+    backup(path)
+    write_atomic(path, "\n".join(lines[:begin] + lines[end + 1:]))
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="gpu-mode-menu")
+    parser.add_argument("command", choices=("install", "remove"))
+    parser.add_argument("--file", type=Path, default=DEFAULT_FILE)
+    args = parser.parse_args()
+    {"install": install, "remove": remove}[args.command](args.file)
+    print(f"{args.command}: {args.file}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
