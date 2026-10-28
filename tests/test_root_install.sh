@@ -72,6 +72,11 @@ stage_copy_refuses_links() (
   rm -rf "$d"
   return $rc
 )
+remove_deletes_old_hook() {
+  grep -qF 'OLD_HOOK="/usr/lib/systemd/system-sleep/omarchy-gpu-mode-igpu"' "$SCRIPT" &&
+    grep -A3 -F 'refuse_remove_in_eco /etc/supergfxd.conf || exit 1' "$SCRIPT" |
+    grep -qE '^ *rm -f .*"\$OLD_HOOK"'
+}
 shellcheck_clean() {
   command -v shellcheck >/dev/null || return 0
   shellcheck "$SCRIPT"
@@ -86,6 +91,7 @@ check "install-root.sh rejects unknown option" unknown_option_rejected
 check "--help mentions --remove" help_mentions_remove
 check "Integrated conf detection" integrated_conf_detected
 check "stage_copy refuses symlinks and non-regular files" stage_copy_refuses_links
+check "--remove deletes the old sleep hook" remove_deletes_old_hook
 check "shellcheck (skipped if absent)" shellcheck_clean
 
 exit "$failed"

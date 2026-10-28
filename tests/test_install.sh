@@ -27,7 +27,7 @@ remove_refused_in_eco() (
   source "$SCRIPT"
   set +e
   out="$(refuse_remove_in_eco "$d/eco" 2>&1)" && rc=1
-  [[ $out == "GPU Mode: switch to Standard or Ultimate before removing (Eco needs the sleep hook)." ]] || rc=1
+  [[ $out == "GPU Mode: switch to Standard or Ultimate before removing (Eco keeps the NVIDIA GPU disabled in firmware)." ]] || rc=1
   for conf in standard ultimate broken missing; do
     refuse_remove_in_eco "$d/$conf" || rc=1
   done

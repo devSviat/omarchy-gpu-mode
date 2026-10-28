@@ -4,7 +4,7 @@
 # polkit action. Run with sudo. Never changes the GPU mode.
 #
 #   sudo ./install-root.sh           install helper and policy, then normalize
-#   sudo ./install-root.sh --remove  remove helper, policy, sleep hook and drop-in
+#   sudo ./install-root.sh --remove  remove helper, policy, drop-in and the old sleep hook
 
 set -euo pipefail
 
@@ -25,7 +25,7 @@ except Exception:
 
 refuse_remove_in_eco() {
   if conf_is_integrated "$1"; then
-    echo "GPU Mode: switch to Standard or Ultimate before removing (Eco needs the sleep hook)." >&2
+    echo "GPU Mode: switch to Standard or Ultimate before removing (Eco keeps the NVIDIA GPU disabled in firmware)." >&2
     return 1
   fi
 }
@@ -67,7 +67,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HELPER_DIR="/usr/local/libexec/omarchy-gpu-mode"
 HELPER="$HELPER_DIR/gpu-mode"
 POLICY="/usr/share/polkit-1/actions/dev.sviat.gpu-mode.policy"
-HOOK="/usr/lib/systemd/system-sleep/omarchy-gpu-mode-igpu"
+OLD_HOOK="/usr/lib/systemd/system-sleep/omarchy-gpu-mode-igpu"
 DROPIN="/etc/systemd/system/supergfxd.service.d/delay-start.conf"
 
 remove="false"
@@ -94,7 +94,7 @@ fi
 
 if [[ "$remove" == "true" ]]; then
   refuse_remove_in_eco /etc/supergfxd.conf || exit 1
-  rm -f "$HELPER" "$POLICY" "$HOOK"
+  rm -f "$HELPER" "$POLICY" "$OLD_HOOK"
   rmdir "$HELPER_DIR" 2>/dev/null || true
   if [[ -e "$DROPIN" ]]; then
     rm -f "$DROPIN"
@@ -104,7 +104,7 @@ if [[ "$remove" == "true" ]]; then
       exit 1
     fi
   fi
-  echo "Removed the GPU mode helper, policy, sleep hook and drop-in."
+  echo "Removed the GPU mode helper, policy and drop-in, and the old sleep hook if present."
   exit 0
 fi
 
