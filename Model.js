@@ -90,9 +90,10 @@ function viewFor(state, selected, repoDir) {
 }
 
 function noticeFor(state, repoDir) {
-    if (!state.stockHookPresent || !state.ownHookPresent || state.active !== "eco")
+    if (!state.stockHookPresent || state.active !== "eco")
         return ""
-    return "Omarchy's force-igpu sleep hook is back next to GPU Mode's. Run: " + installCommand(repoDir)
+    return "Omarchy's force-igpu sleep hook is back and conflicts with GPU Mode's Eco. Run: "
+        + installCommand(repoDir)
 }
 
 // pkexec exits 126 when the user dismisses the auth dialog and 127 when

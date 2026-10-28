@@ -87,11 +87,9 @@ def test_marker_drives_inconsistent_not_pending_reboot():
 def test_hook_presence():
     base = fakeroot.build()
     got = gm.state(gm.Root(base), "Hybrid", Path("/x"))
-    assert got["ownHookPresent"] is False and got["stockHookPresent"] is False
-    fakeroot.write(base, gm.HOOK_PATH.lstrip("/"), "x")
+    assert got["stockHookPresent"] is False and "ownHookPresent" not in got
     fakeroot.write(base, gm.STOCK_HOOK_PATH.lstrip("/"), "x")
-    got = gm.state(gm.Root(base), "Hybrid", Path("/x"))
-    assert got["ownHookPresent"] is True and got["stockHookPresent"] is True
+    assert gm.state(gm.Root(base), "Hybrid", Path("/x"))["stockHookPresent"] is True
 
 
 def test_only_the_marker_makes_it_inconsistent():
@@ -235,7 +233,7 @@ def test_main_state_survives_internal_failure():
 
 CONTRACT_KEYS = {"version", "active", "configured", "inconsistent", "pendingMode", "mux",
                  "muxPendingReboot", "dgpuDisabled", "externalConnected", "stockHookPresent",
-                 "ownHookPresent", "helper", "error"}
+                 "helper", "error"}
 
 
 if __name__ == "__main__":

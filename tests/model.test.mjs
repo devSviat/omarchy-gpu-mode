@@ -10,7 +10,7 @@ function state(over) {
   return Object.assign({
     version: 1, active: "standard", configured: "standard", inconsistent: false,
     pendingMode: null, mux: 1, muxPendingReboot: false, dgpuDisabled: false,
-    externalConnected: [], stockHookPresent: false, ownHookPresent: false,
+    externalConnected: [], stockHookPresent: false,
     helper: "current", error: ""
   }, over || {})
 }
@@ -96,11 +96,11 @@ test("monitor warning only for eco with connections", () => {
 })
 
 test("noticeFor stock hook", () => {
-  const text = "Omarchy's force-igpu sleep hook is back next to GPU Mode's. Run: " + INSTALL
-  assert.equal(M.noticeFor(state({ active: "eco", stockHookPresent: true, ownHookPresent: true }), REPO), text)
-  assert.equal(M.noticeFor(state({ active: "standard", stockHookPresent: true, ownHookPresent: true }), REPO), "")
-  assert.equal(M.noticeFor(state({ active: "eco", stockHookPresent: false, ownHookPresent: true }), REPO), "")
-  assert.equal(M.noticeFor(state({ active: "eco", stockHookPresent: true, ownHookPresent: false }), REPO), "")
+  const text = "Omarchy's force-igpu sleep hook is back and conflicts with GPU Mode's Eco. Run: " + INSTALL
+  assert.equal(M.noticeFor(state({ active: "eco", stockHookPresent: true }), REPO), text)
+  assert.equal(M.noticeFor(state({ active: "standard", stockHookPresent: true }), REPO), "")
+  assert.equal(M.noticeFor(state({ active: "ultimate", stockHookPresent: true }), REPO), "")
+  assert.equal(M.noticeFor(state({ active: "eco", stockHookPresent: false }), REPO), "")
 })
 
 test("classifyHelperExit: 126 is dismissed, 127 is an error", () => {

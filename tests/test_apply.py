@@ -42,9 +42,12 @@ def put(base, rel, text, mode):
     return p
 
 
-def eco_files(base):
-    return {rel: Path(base, rel.lstrip("/")) for rel in
-            (gm.HOOK_PATH, gm.DROPIN_PATH)}
+def old_hook(base):
+    return Path(base, gm.HOOK_PATH.lstrip("/"))
+
+
+def dropin(base):
+    return Path(base, gm.DROPIN_PATH.lstrip("/"))
 
 
 def apply(base, mode, **kwargs):
@@ -83,14 +86,15 @@ def test_standard_to_eco():
     base = fakeroot.build(conf_mode="Hybrid", mux="1")
     conf_file(base).write_text(json.dumps({"mode": "Hybrid", "hotplug_type": "None", "keep": 7}))
     put(base, gm.STOCK_HOOK_PATH, "#!/bin/bash\n", 0o755)
+    put(base, gm.HOOK_PATH, "old hook", 0o755)
     calls = run_apply(base, "eco")
     got = json.loads(conf_file(base).read_text())
     assert got == {"mode": "Integrated", "hotplug_type": "Asus", "keep": 7}
     assert dgpu_file(base).read_text() == "0\n"
     assert mux_file(base).read_text() == "1\n"
-    hook, dropin = Path(base, gm.HOOK_PATH.lstrip("/")), Path(base, gm.DROPIN_PATH.lstrip("/"))
-    assert hook.read_text() == gm.HOOK_SOURCE and hook.stat().st_mode & 0o777 == 0o755
-    assert dropin.read_text() == gm.DROPIN_SOURCE and dropin.stat().st_mode & 0o777 == 0o644
+    assert not old_hook(base).exists()
+    assert dropin(base).read_text() == gm.DROPIN_SOURCE
+    assert dropin(base).stat().st_mode & 0o777 == 0o644
     assert conf_file(base).stat().st_mode & 0o777 == 0o644
     assert not Path(base, gm.STOCK_HOOK_PATH.lstrip("/")).exists()
     assert calls == [1]
@@ -103,8 +107,7 @@ def test_eco_to_ultimate():
     calls = run_apply(base, "ultimate")
     assert json.loads(conf_file(base).read_text())["mode"] == "AsusMuxDgpu"
     assert mux_file(base).read_text() == "0"
-    for p in eco_files(base).values():
-        assert not p.exists()
+    assert not dropin(base).exists() and not old_hook(base).exists()
     assert calls == [1]
 
 
@@ -113,8 +116,22 @@ def test_ultimate_to_eco_single_step():
     run_apply(base, "eco")
     assert mux_file(base).read_text() == "1"
     assert json.loads(conf_file(base).read_text())["mode"] == "Integrated"
-    for p in eco_files(base).values():
-        assert p.is_file()
+    assert dropin(base).is_file() and not old_hook(base).exists()
+
+
+def test_every_mode_removes_the_old_hook_and_keeps_the_stock_one_outside_eco():
+    for mode in gm.MODES:
+        base = fakeroot.build(conf_mode="Hybrid", mux="1")
+        put(base, gm.HOOK_PATH, "old hook", 0o755)
+        put(base, gm.STOCK_HOOK_PATH, "stock", 0o755)
+        run_apply(base, mode)
+        assert not old_hook(base).exists(), mode
+        stock = Path(base, gm.STOCK_HOOK_PATH.lstrip("/"))
+        assert stock.exists() is (mode != "eco"), mode
+
+
+def test_no_sleep_hook_is_shipped():
+    assert not hasattr(gm, "HOOK_SOURCE")
 
 
 def recording_writes(fn):
@@ -218,6 +235,7 @@ def test_rollback_on_failure():
     base = fakeroot.build(conf_mode="AsusMuxDgpu", mux="0")
     put(base, gm.STOCK_HOOK_PATH, "stock", 0o755)
     put(base, gm.DROPIN_PATH, "old dropin", 0o644)
+    put(base, gm.HOOK_PATH, "old hook", 0o755)
     paths = ("etc/supergfxd.conf", fakeroot.ARMOURY + "/gpu_mux_mode/current_value",
              gm.HOOK_PATH, gm.DROPIN_PATH, gm.STOCK_HOOK_PATH)
     before = snap(base, *paths)
@@ -487,38 +505,45 @@ def test_marker_rolled_back():
 def test_normalize():
     base = fakeroot.build(conf_mode="AsusMuxDgpu", mux="1")
     assert gm.normalize(gm.Root(base)) is True
-    assert json.loads(conf_file(base).read_text())["mode"] == "Hybrid"
+    assert json.loads(conf_file(base).read_text()) == {"mode": "Hybrid", "hotplug_type": "Asus"}
+    assert conf_file(base).stat().st_mode & 0o777 == 0o644
     for conf_mode, mux in (("AsusMuxDgpu", "0"), ("Hybrid", "1"), ("Integrated", "1")):
         base = fakeroot.build(conf_mode=conf_mode, mux=mux)
+        conf_file(base).write_text(json.dumps({"mode": conf_mode, "hotplug_type": "None",
+                                               "vfio_enable": True, "keep": [1]}))
+        assert gm.normalize(gm.Root(base)) is True
+        assert json.loads(conf_file(base).read_text()) == {
+            "mode": conf_mode, "hotplug_type": "Asus", "vfio_enable": True, "keep": [1]}
         before = conf_file(base).read_bytes()
         assert gm.normalize(gm.Root(base)) is False
         assert conf_file(base).read_bytes() == before
 
 
-def test_normalize_removes_stock_hook_when_ours_present():
+def test_normalize_refuses_bad_conf():
+    base = fakeroot.build(conf_text="{not json")
+    put(base, gm.HOOK_PATH, "old hook", 0o755)
+    assert raises_apply(lambda: gm.normalize(gm.Root(base)))
+    assert conf_file(base).read_text() == "{not json"
+
+
+def test_normalize_removes_old_hook():
+    for conf_mode in ("Hybrid", "Integrated", "AsusMuxDgpu"):
+        base = fakeroot.build(conf_mode=conf_mode, mux="1")
+        put(base, gm.HOOK_PATH, "old hook", 0o755)
+        gm.normalize(gm.Root(base))
+        assert not old_hook(base).exists(), conf_mode
+
+
+def test_normalize_removes_stock_hook_in_eco_only():
     base = fakeroot.build(conf_mode="Integrated", mux="1")
-    put(base, gm.HOOK_PATH, gm.HOOK_SOURCE, 0o755)
     put(base, gm.STOCK_HOOK_PATH, "stock", 0o755)
     gm.normalize(gm.Root(base))
     assert not Path(base, gm.STOCK_HOOK_PATH.lstrip("/")).exists()
-    assert Path(base, gm.HOOK_PATH.lstrip("/")).is_file()
-
-
-def test_normalize_keeps_stock_hook_when_ours_absent():
-    base = fakeroot.build(conf_mode="Integrated", mux="1")
-    put(base, gm.STOCK_HOOK_PATH, "stock", 0o755)
-    gm.normalize(gm.Root(base))
-    assert Path(base, gm.STOCK_HOOK_PATH.lstrip("/")).read_text() == "stock"
-
-
-def test_hook_parses():
-    path = Path(fakeroot.mkdtemp("gpumode-hook-")) / "hook"
-    path.write_text(gm.HOOK_SOURCE)
-    done = subprocess.run(["/usr/bin/bash", "-n", str(path)], capture_output=True, text=True)
-    assert done.returncode == 0, done.stderr
-    assert gm.HOOK_SOURCE.startswith("#!/bin/bash\n")
-    assert "/run/omarchy-gpu-mode-igpu" in gm.HOOK_SOURCE
-    assert "force-igpu, MIT" in gm.HOOK_SOURCE
+    for conf_mode in ("Hybrid", "AsusMuxDgpu"):
+        base = fakeroot.build(conf_mode=conf_mode, mux="1")
+        put(base, gm.STOCK_HOOK_PATH, "stock", 0o755)
+        gm.normalize(gm.Root(base))
+        assert Path(base, gm.STOCK_HOOK_PATH.lstrip("/")).read_text() == "stock"
 
 
 def test_dropin_matches_stock():

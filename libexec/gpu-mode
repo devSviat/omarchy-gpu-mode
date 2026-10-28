@@ -204,73 +204,10 @@ def state(root, runtime, repo_file):
         "dgpuDisabled": dgpu_off,
         "externalConnected": external_connected(root),
         "stockHookPresent": root.p(STOCK_HOOK_PATH).exists(),
-        "ownHookPresent": root.p(HOOK_PATH).exists(),
         "helper": helper_status(repo_file, root.p(str(INSTALLED_HELPER))),
         "error": error,
     }
 
-HOOK_SOURCE = r"""#!/bin/bash
-# Adapted from Omarchy's default/systemd/system-sleep/force-igpu, MIT.
-
-set -e
-
-# Integrated mode wakes up in Hybrid after suspend on some ASUS laptops; the Vfio to
-# Integrated switch powers the dGPU off again without a restart.
-
-restore_marker=/run/omarchy-gpu-mode-igpu
-sleep_action=${SYSTEMD_SLEEP_ACTION:-$2}
-[[ -x /usr/bin/supergfxctl ]] || exit 0
-
-switch_mode() {
-  local expected="$1" current
-
-  if ! /usr/bin/timeout --kill-after=1s 3s /usr/bin/supergfxctl -m "$expected"; then
-    echo "Could not request the GPU transition to $expected mode" >&2
-    return 1
-  fi
-  for _ in {1..10}; do
-    if current=$(/usr/bin/timeout --kill-after=1s 2s /usr/bin/supergfxctl -g 2>/dev/null) &&
-      [[ $current == "$expected" ]]; then
-      return 0
-    fi
-    sleep 1
-  done
-
-  echo "Could not confirm the GPU transition to $expected mode" >&2
-  return 1
-}
-
-case "$1" in
-  pre)
-    # The marker records the mode this sleep cycle started in: the temporary hibernate
-    # switch to Vfio is persisted by supergfxctl, so post must not consult the live mode.
-    if [[ -L $restore_marker ]]; then
-      exit 1
-    elif [[ ! -f $restore_marker ]]; then
-      active=$(/usr/bin/timeout --kill-after=1s 3s /usr/bin/supergfxctl -g 2>/dev/null) || exit 0
-      [[ $active == "Integrated" ]] || exit 0
-      /usr/bin/grep -Eq '"mode"[[:space:]]*:[[:space:]]*"Integrated"' /etc/supergfxd.conf 2>/dev/null || exit 0
-      /usr/bin/install -m 0600 -o root -g root -T /dev/null "$restore_marker"
-    fi
-
-    # Without detaching the nvidia driver first, hibernate resume fails: the driver
-    # cannot freeze a powered-off dGPU (-EIO), which aborts the entire resume.
-    if [[ $sleep_action == "hibernate" ]]; then
-      switch_mode Vfio
-    fi
-    ;;
-  post)
-    [[ -f $restore_marker && ! -L $restore_marker ]] || exit 0
-
-    # Let the device finish re-enumerating.
-    sleep 4
-
-    switch_mode Vfio
-    switch_mode Integrated
-    /usr/bin/rm -f -- "$restore_marker"
-    ;;
-esac
-"""
 
 DROPIN_SOURCE = """[Service]
 # Delay startup to avoid race condition with display manager initialization
@@ -286,8 +223,8 @@ class ApplyError(Exception):
 
 
 def target_config(conf, mode):
-    # With "Asus", supergfxd sets dgpu_disable=1 at an Integrated boot and after every
-    # resume, and clears it at a Hybrid boot; AsusMuxDgpu does not use it.
+    # With "Asus", supergfxd sets dgpu_disable=1 at an Integrated boot and again after
+    # each resume in Integrated, and clears it at a Hybrid boot; AsusMuxDgpu ignores it.
     return {**conf, "mode": MODES[mode], "hotplug_type": "Asus"}
 
 
@@ -413,12 +350,12 @@ def apply_mode(root, mode, reload=lambda: None, owner_uid=0, runtime=runtime_mod
         if read_mux(root) != want_mux or mux_pending(root):
             mux_written = True
             _write_attr(mux_file, str(want_mux))
+        _remove(hook_file)
         if mode == "eco":
-            _install(hook_file, HOOK_SOURCE.encode(), 0o755, owner_uid)
             _install(dropin_file, DROPIN_SOURCE.encode(), 0o644, owner_uid)
+            # The stock hook would run its Vfio switch against the firmware-disabled dGPU.
             _remove(stock_file)
         else:
-            _remove(hook_file)
             _remove(dropin_file)
         _atomic_write(conf_file, new_conf, 0o644)
         if saved_files[dropin_file] != _snapshot_file(dropin_file):
@@ -452,25 +389,26 @@ def normalize(root):
         conf = read_conf(root)
     except ConfError as exc:
         raise ApplyError(str(exc)) from exc
-    stock_file = root.p(STOCK_HOOK_PATH)
+    new_conf = {**conf, "hotplug_type": "Asus"}
+    if conf["mode"] == "AsusMuxDgpu" and read_mux(root) == 1:
+        new_conf["mode"] = "Hybrid"
     try:
-        if _snapshot_file(root.p(HOOK_PATH)) is not None:
-            _remove(stock_file)
-        if conf["mode"] != "AsusMuxDgpu" or read_mux(root) != 1:
-            return False
-        _atomic_write(root.p(CONF_PATH),
-                      json.dumps({**conf, "mode": "Hybrid"}, indent=2).encode() + b"\n", 0o644)
+        _remove(root.p(HOOK_PATH))
+        if new_conf != conf:
+            _atomic_write(root.p(CONF_PATH),
+                          json.dumps(new_conf, indent=2).encode() + b"\n", 0o644)
+        if new_conf["mode"] == "Integrated":
+            _remove(root.p(STOCK_HOOK_PATH))
     except Exception as exc:
         raise ApplyError(f"normalize failed: {exc}") from exc
-    return True
+    return new_conf != conf
 
 
 def _fallback_state(error):
     return {
         "version": 1, "active": "standard", "configured": "unknown", "inconsistent": False,
         "pendingMode": None, "mux": None, "muxPendingReboot": False, "dgpuDisabled": None,
-        "externalConnected": [], "stockHookPresent": False, "ownHookPresent": False,
-        "helper": "missing",
+        "externalConnected": [], "stockHookPresent": False, "helper": "missing",
         "error": error,
     }
 
