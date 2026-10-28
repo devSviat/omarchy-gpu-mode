@@ -43,6 +43,13 @@ def test_marker_is_active_when_runtime_unknown():
     assert d("AsusMuxDgpu", 0, "Hybrid", True, False, "eco")["active"] == "standard"
 
 
+def test_switch_kept_in_eco_by_firmware():
+    got = gm.derive_state("Hybrid", 1, "Integrated", False, True, None)
+    assert got == {"active": "eco", "configured": "standard", "inconsistent": False}, got
+    got = gm.derive_state("AsusMuxDgpu", 1, "Integrated", False, True, None)
+    assert got == {"active": "eco", "configured": "ultimate", "inconsistent": False}, got
+
+
 def test_runtime_wins_over_written_mux():
     got = gm.derive_state("Hybrid", 1, "AsusMuxDgpu", True, False, "ultimate")
     assert got["active"] == "ultimate" and got["inconsistent"] is True, got

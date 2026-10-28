@@ -387,6 +387,7 @@ def test_main_requires_root():
         return
     assert gm.main(["apply", "eco"]) == 1
     assert gm.main(["normalize"]) == 1
+    assert gm.main(["restore-hotplug"]) == 1
 
 
 def test_created_dir_ignores_caller_umask():
@@ -485,6 +486,96 @@ def test_revert_without_supergfxd():
     assert json.loads(conf_file(base).read_text())["mode"] == "Hybrid"
 
 
+def cleared(base):
+    return Path(base, gm.DGPU_CLEARED.lstrip("/"))
+
+
+def test_leaving_eco_records_the_cleared_dgpu_disable():
+    base = fakeroot.build(conf_mode="Integrated", mux="1", dgpu_disable="1", nvidia=False)
+    apply(base, "standard", runtime=lambda: "Integrated")
+    assert cleared(base).is_file() and cleared(base).stat().st_mode & 0o777 == 0o644
+    base = fakeroot.build(conf_mode="Hybrid", mux="1")
+    apply(base, "ultimate", runtime=lambda: "Hybrid")
+    assert not cleared(base).exists()
+
+
+def test_revert_to_eco_without_gpu_disables_it_again():
+    base = fakeroot.build(conf_mode="Integrated", mux="1", dgpu_disable="1", nvidia=False)
+    apply(base, "standard", runtime=lambda: "Integrated")
+    assert dgpu_file(base).read_text() == "0"
+    apply(base, "eco", runtime=lambda: "Integrated")
+    assert dgpu_file(base).read_text() == "1"
+    assert not marker(base).exists() and not cleared(base).exists()
+    assert json.loads(conf_file(base).read_text())["mode"] == "Integrated"
+
+
+def test_revert_to_eco_from_ultimate_writes_mux_before_dgpu_disable():
+    base = fakeroot.build(conf_mode="Integrated", mux="1", dgpu_disable="1", nvidia=False)
+    apply(base, "ultimate", runtime=lambda: "Integrated")
+    writes = recording_writes(lambda: apply(base, "eco", runtime=lambda: "Integrated"))
+    assert writes == [("gpu_mux_mode", "1"), ("dgpu_disable", "1")], writes
+
+
+def test_revert_to_eco_with_gpu_present_keeps_dgpu_enabled_and_pending():
+    base = fakeroot.build(conf_mode="Integrated", mux="1", dgpu_disable="1", nvidia=False)
+    apply(base, "standard", runtime=lambda: "Integrated")
+    fakeroot.write(base, "sys/bus/pci/devices/0000:01:00.1/vendor", "0x10de\n")
+    apply(base, "eco", runtime=lambda: "Integrated")
+    assert dgpu_file(base).read_text() == "0"
+    assert marker(base).read_text() == "eco\n" and cleared(base).is_file()
+    got = gm.state(gm.Root(base), "Integrated", Path("/x"))
+    assert got["inconsistent"] is True and got["pendingMode"] == "eco", got
+
+
+def test_revert_to_eco_rolled_back():
+    base = fakeroot.build(conf_mode="Integrated", mux="1", dgpu_disable="1", nvidia=False)
+    apply(base, "standard", runtime=lambda: "Integrated")
+    fail_conf_write_once(lambda: apply(base, "eco", runtime=lambda: "Integrated"))
+    assert dgpu_file(base).read_text() == "0"
+    assert marker(base).read_text() == "eco\n" and cleared(base).is_file()
+
+
+def test_dgpu_disable_is_never_written_with_an_nvidia_function_present():
+    base = fakeroot.build(nvidia=False)
+    fakeroot.write(base, "sys/bus/pci/devices/0000:01:00.1/vendor", "0x10de\n")
+    root = gm.Root(base)
+    assert gm.nvidia_function_present(root) is True
+    assert raises_apply(lambda: gm._write_dgpu(root, dgpu_file(base), "1"))
+    assert dgpu_file(base).read_text() == "0\n"
+    gm._write_dgpu(root, dgpu_file(base), "0")
+    assert not gm.nvidia_function_present(gm.Root(fakeroot.build(nvidia=False)))
+    assert gm.nvidia_function_present(gm.Root(fakeroot.mkdtemp("gpumode-nopci-"))) is True
+
+
+def test_rollback_keeps_dgpu_enabled_when_gpu_present():
+    original = gm._atomic_write
+
+    def failing(path, data, mode):
+        if str(path).endswith("supergfxd.conf"):
+            raise OSError("disk full")
+        return original(path, data, mode)
+
+    base = fakeroot.build(conf_mode="Integrated", mux="1", dgpu_disable="1", nvidia=True)
+    gm._atomic_write = failing
+    try:
+        run_apply(base, "standard")
+        raise AssertionError("no error")
+    except gm.ApplyError as exc:
+        msg = str(exc)
+    finally:
+        gm._atomic_write = original
+    assert "the NVIDIA GPU stays enabled until the next Eco boot" in msg, msg
+    assert dgpu_file(base).read_text() == "0"
+    assert json.loads(conf_file(base).read_text())["mode"] == "Integrated"
+
+
+def test_rollback_restores_dgpu_disable_when_gpu_absent():
+    base = fakeroot.build(conf_mode="Integrated", mux="1", dgpu_disable="1", nvidia=False)
+    fail_conf_write_once(lambda: run_apply(base, "standard"))
+    assert dgpu_file(base).read_text().strip() == "1"
+    assert not cleared(base).exists()
+
+
 def test_marker_falls_back_to_runtime():
     base = fakeroot.build(conf_mode="Hybrid", mux="1")
     marker(base).parent.mkdir(parents=True)
@@ -524,6 +615,45 @@ def test_normalize_refuses_bad_conf():
     put(base, gm.HOOK_PATH, "old hook", 0o755)
     assert raises_apply(lambda: gm.normalize(gm.Root(base)))
     assert conf_file(base).read_text() == "{not json"
+
+
+def test_normalize_writes_conf_before_removing_old_hook():
+    base = fakeroot.build(conf_mode="Hybrid", mux="1")
+    put(base, gm.HOOK_PATH, "old hook", 0o755)
+    original = gm._atomic_write
+
+    def failing(*a):
+        raise OSError("disk full")
+
+    gm._atomic_write = failing
+    try:
+        assert raises_apply(lambda: gm.normalize(gm.Root(base)))
+    finally:
+        gm._atomic_write = original
+    assert old_hook(base).read_text() == "old hook"
+
+
+def test_restore_hotplug():
+    base = fakeroot.build()
+    conf_file(base).write_text(json.dumps({"mode": "Hybrid", "hotplug_type": "Asus", "k": 1}))
+    conf_file(base).chmod(0o640)
+    assert gm.restore_hotplug(gm.Root(base)) is True
+    assert json.loads(conf_file(base).read_text()) == {"mode": "Hybrid", "hotplug_type": "None", "k": 1}
+    assert conf_file(base).stat().st_mode & 0o777 == 0o640
+    assert gm.restore_hotplug(gm.Root(base)) is False
+    base = fakeroot.build(conf_mode="Integrated")
+    conf_file(base).write_text(json.dumps({"mode": "Integrated", "hotplug_type": "Asus"}))
+    assert raises_apply(lambda: gm.restore_hotplug(gm.Root(base)))
+    assert json.loads(conf_file(base).read_text())["hotplug_type"] == "Asus"
+
+
+def test_restore_hotplug_refused_under_pkexec():
+    os.environ["PKEXEC_UID"] = "1000"
+    try:
+        assert gm.main(["restore-hotplug"]) == 2
+    finally:
+        del os.environ["PKEXEC_UID"]
+    assert gm.main(["restore-hotplug", "x"]) == 2
 
 
 def test_normalize_removes_old_hook():

@@ -22,6 +22,7 @@ STOCK_HOOK_PATH = "/usr/lib/systemd/system-sleep/force-igpu"
 HOOK_PATH = "/usr/lib/systemd/system-sleep/omarchy-gpu-mode-igpu"
 DROPIN_PATH = "/etc/systemd/system/supergfxd.service.d/delay-start.conf"
 PENDING_MARKER = "/run/omarchy-gpu-mode/pending"
+DGPU_CLEARED = "/run/omarchy-gpu-mode/dgpu-cleared"
 NVIDIA_VENDOR = "0x10de"
 
 
@@ -87,6 +88,15 @@ def dgpu_disabled(root):
     path = dgpu_path(root)
     value = _read(path) if path else None
     return {"0": False, "1": True}.get(value)
+
+
+def nvidia_function_present(root):
+    devices = root.p(PCI_DEVICES)
+    try:
+        entries = list(devices.iterdir())
+    except OSError:
+        return True
+    return any(_read(dev / "vendor") == NVIDIA_VENDOR for dev in entries)
 
 
 def nvidia_card(root):
@@ -223,8 +233,9 @@ class ApplyError(Exception):
 
 
 def target_config(conf, mode):
-    # With "Asus", supergfxd sets dgpu_disable=1 at an Integrated boot and again after
-    # each resume in Integrated, and clears it at a Hybrid boot; AsusMuxDgpu ignores it.
+    # With "Asus", supergfxd sets dgpu_disable=1 at an Integrated boot and after each resume
+    # in Integrated. While it is 1 the boot check forces Integrated, so a Hybrid boot
+    # re-enables the dGPU only if dgpu_disable was cleared before the reboot.
     return {**conf, "mode": MODES[mode], "hotplug_type": "Asus"}
 
 
@@ -277,6 +288,13 @@ def _write_attr(path, value):
         handle.write(value)
 
 
+def _write_dgpu(root, path, value):
+    # dgpu_disable=1 hot-removes the GPU, which is unsafe while a driver may be bound to it.
+    if value.strip() == "1" and nvidia_function_present(root):
+        raise ApplyError("refusing dgpu_disable=1 while an NVIDIA PCI function is present")
+    _write_attr(path, value)
+
+
 def _ensure_private_dir(directory, owner_uid):
     directory = Path(directory)
     directory.mkdir(mode=0o755, parents=True, exist_ok=True)
@@ -314,8 +332,9 @@ def apply_mode(root, mode, reload=lambda: None, owner_uid=0, runtime=runtime_mod
     if mux_file is None:
         raise ApplyError("MUX attribute not found")
     # The kernel refuses MUX = dGPU while dgpu_disable=1, and supergfxd forces Integrated
-    # at boot while it is set. Eco never writes 1 live: the running session uses the GPU.
-    dgpu_file = dgpu_path(root) if mode != "eco" and dgpu_disabled(root) is True else None
+    # at boot while it is set, so leaving Eco clears it first.
+    dgpu_file = dgpu_path(root)
+    clear_dgpu = mode != "eco" and dgpu_file is not None and dgpu_disabled(root) is True
 
     # The marker keeps the mode this boot started in, so a second switch before
     # the reboot still compares against it; /run is cleared by the reboot.
@@ -327,29 +346,42 @@ def apply_mode(root, mode, reload=lambda: None, owner_uid=0, runtime=runtime_mod
     dropin_file = root.p(DROPIN_PATH)
     stock_file = root.p(STOCK_HOOK_PATH)
     marker_file = root.p(PENDING_MARKER)
+    cleared_file = root.p(DGPU_CLEARED)
+    # A revert to Eco after this boot cleared dgpu_disable: left at 0, supergfxd would
+    # write 1 on the next resume, possibly under a bound driver. The record decides,
+    # not the readback, which keeps showing the boot value.
+    redisable = (mode == "eco" and boot_mode == "eco" and dgpu_file is not None
+                 and cleared_file.is_file())
+    keep_pending = redisable and nvidia_function_present(root)
+    redisable = redisable and not keep_pending
     want_mux = 0 if mode == "ultimate" else 1
     new_conf = json.dumps(target_config(conf, mode), indent=2).encode() + b"\n"
     try:
         saved_mux = mux_file.read_bytes()
-        saved_dgpu = dgpu_file.read_bytes() if dgpu_file else None
-        saved_files = {p: _snapshot_file(p)
-                       for p in (conf_file, hook_file, dropin_file, stock_file, marker_file)}
+        saved_dgpu = dgpu_file.read_bytes() if clear_dgpu or redisable else None
+        saved_files = {p: _snapshot_file(p) for p in
+                       (conf_file, hook_file, dropin_file, stock_file, marker_file, cleared_file)}
     except OSError as exc:
         raise ApplyError(f"cannot snapshot state: {exc}") from exc
 
-    mux_written = dgpu_written = False
+    written = []
     try:
-        if mode == boot_mode:
+        if mode == boot_mode and not keep_pending:
             _remove(marker_file)
         else:
             _install(marker_file, f"{boot_mode}\n".encode(), 0o644, owner_uid)
-        if dgpu_file:
-            dgpu_written = True
-            _write_attr(dgpu_file, "0")
+        if clear_dgpu:
+            _install(cleared_file, b"1\n", 0o644, owner_uid)
+            written.append((dgpu_file, saved_dgpu))
+            _write_dgpu(root, dgpu_file, "0")
         # current_value may not reflect a write before the reboot, so pending_reboot also forces the write.
         if read_mux(root) != want_mux or mux_pending(root):
-            mux_written = True
+            written.append((mux_file, saved_mux))
             _write_attr(mux_file, str(want_mux))
+        if redisable:
+            written.append((dgpu_file, saved_dgpu))
+            _write_dgpu(root, dgpu_file, "1")
+            _remove(cleared_file)
         _remove(hook_file)
         if mode == "eco":
             _install(dropin_file, DROPIN_SOURCE.encode(), 0o644, owner_uid)
@@ -364,10 +396,12 @@ def apply_mode(root, mode, reload=lambda: None, owner_uid=0, runtime=runtime_mod
         errors = [f"apply {mode} failed: {exc}"]
         dropin_dirty = _snapshot_file(dropin_file) != saved_files[dropin_file]
         steps = []
-        if mux_written:
-            steps.append(lambda: _write_attr(mux_file, saved_mux.decode()))
-        if dgpu_written:
-            steps.append(lambda: _write_attr(dgpu_file, saved_dgpu.decode()))
+        # Reverse order: the kernel takes MUX = dGPU only while dgpu_disable=0.
+        for path, saved in reversed(written):
+            if path == dgpu_file:
+                steps.append(lambda saved=saved: _restore_dgpu(root, dgpu_file, saved, errors))
+            else:
+                steps.append(lambda path=path, saved=saved: _write_attr(path, saved.decode()))
         for path, saved in saved_files.items():
             steps.append(lambda path=path, saved=saved: (
                 _snapshot_file(path) != saved and _restore_file(path, saved)))
@@ -384,6 +418,13 @@ def apply_mode(root, mode, reload=lambda: None, owner_uid=0, runtime=runtime_mod
         raise ApplyError("; ".join(errors)) from exc
 
 
+def _restore_dgpu(root, path, saved, errors):
+    if saved.strip() == b"1" and nvidia_function_present(root):
+        errors.append("the NVIDIA GPU stays enabled until the next Eco boot")
+        return
+    _write_dgpu(root, path, saved.decode())
+
+
 def normalize(root):
     try:
         conf = read_conf(root)
@@ -393,15 +434,35 @@ def normalize(root):
     if conf["mode"] == "AsusMuxDgpu" and read_mux(root) == 1:
         new_conf["mode"] = "Hybrid"
     try:
-        _remove(root.p(HOOK_PATH))
         if new_conf != conf:
             _atomic_write(root.p(CONF_PATH),
                           json.dumps(new_conf, indent=2).encode() + b"\n", 0o644)
+        _remove(root.p(HOOK_PATH))
         if new_conf["mode"] == "Integrated":
             _remove(root.p(STOCK_HOOK_PATH))
     except Exception as exc:
         raise ApplyError(f"normalize failed: {exc}") from exc
     return new_conf != conf
+
+
+def restore_hotplug(root):
+    try:
+        conf = read_conf(root)
+    except ConfError as exc:
+        raise ApplyError(str(exc)) from exc
+    # With "None" an Integrated boot no longer disables the dGPU in firmware, so the
+    # reset belongs to a mode that does not depend on it.
+    if conf["mode"] == "Integrated":
+        raise ApplyError("switch to Standard or Ultimate before restoring hotplug_type")
+    if conf.get("hotplug_type") == "None":
+        return False
+    path = root.p(CONF_PATH)
+    try:
+        _atomic_write(path, json.dumps({**conf, "hotplug_type": "None"}, indent=2).encode()
+                      + b"\n", stat.S_IMODE(os.stat(path).st_mode))
+    except Exception as exc:
+        raise ApplyError(f"restore-hotplug failed: {exc}") from exc
+    return True
 
 
 def _fallback_state(error):
@@ -423,14 +484,16 @@ def main(argv):
         return 0
     if argv[:1] == ["apply"] and len(argv) == 2 and argv[1] in MODES:
         return _run_root(lambda: apply_mode(Root("/"), argv[1], reload=_daemon_reload))
-    if argv == ["normalize"]:
-        # The only environment read, and it can only refuse: normalize belongs to the
-        # sudo install step, never to the polkit action (pkexec sets PKEXEC_UID).
+    root_only = {"normalize": normalize, "restore-hotplug": restore_hotplug}
+    if len(argv) == 1 and argv[0] in root_only:
+        # The only environment read, and it can only refuse: these belong to the sudo
+        # install steps, never to the polkit action (pkexec sets PKEXEC_UID).
         if "PKEXEC_UID" in os.environ:
-            print("gpu-mode: normalize is not available through pkexec", file=sys.stderr)
+            print(f"gpu-mode: {argv[0]} is not available through pkexec", file=sys.stderr)
             return 2
-        return _run_root(lambda: normalize(Root("/")))
-    print("usage: gpu-mode state | apply <eco|standard|ultimate> | normalize", file=sys.stderr)
+        return _run_root(lambda: root_only[argv[0]](Root("/")))
+    print("usage: gpu-mode state | apply <eco|standard|ultimate> | normalize | restore-hotplug",
+          file=sys.stderr)
     return 2
 
 
