@@ -127,6 +127,72 @@ def test_unparseable_shape_rejected():
         assert p.read_text() == "[]\n"
 
 
+def test_symlinked_file_stays_link():
+    d, real = tmpfile(TEMPLATE)
+    with d:
+        link = real.parent / "link.jsonc"
+        link.symlink_to(real)
+        assert run("install", link).returncode == 0
+        assert link.is_symlink()
+        assert "GPU Mode" in real.read_text()
+        assert run("remove", link).returncode == 0
+        assert link.is_symlink()
+        assert real.read_bytes() == TEMPLATE.encode()
+
+
+def test_crlf_roundtrip():
+    original = TEMPLATE.replace("\n", "\r\n").encode()
+    d, p = tmpfile(None)
+    with d:
+        p.write_bytes(original)
+        assert run("install", p).returncode == 0
+        installed = p.read_bytes()
+        assert installed.count(b"\n") == installed.count(b"\r\n")
+        assert list(strip_jsonc(installed.decode())) == ["trigger.hardware.hybrid-gpu"]
+        assert run("remove", p).returncode == 0
+        assert p.read_bytes() == original
+
+
+def test_damaged_marker_refused():
+    d, p = tmpfile(TEMPLATE)
+    with d:
+        run("install", p)
+        damaged = p.read_text().replace("// <<< sviat.gpu-mode\n", "")
+        p.write_text(damaged)
+        for cmd in ("install", "remove"):
+            assert run(cmd, p).returncode != 0
+            assert p.read_text() == damaged
+
+
+def test_opener_not_on_first_line():
+    original = "// header\n\n{\n  // x\n}\n"
+    d, p = tmpfile(original)
+    with d:
+        assert run("install", p).returncode == 0
+        assert list(strip_jsonc(p.read_text())) == ["trigger.hardware.hybrid-gpu"]
+        run("remove", p)
+        assert p.read_text() == original
+
+
+def test_brace_in_comment_ignored():
+    original = "// {\n{\n}\n"
+    d, p = tmpfile(original)
+    with d:
+        run("install", p)
+        lines = p.read_text().split("\n")
+        assert lines[0] == "// {" and lines[1] == "{" and "gpu-mode" in lines[2]
+        run("remove", p)
+        assert p.read_text() == original
+
+
+def test_empty_file_like_missing():
+    d, p = tmpfile("")
+    with d:
+        assert run("install", p).returncode == 0
+        assert list(strip_jsonc(p.read_text())) == ["trigger.hardware.hybrid-gpu"]
+        assert not list(p.parent.glob("*.bak"))
+
+
 if __name__ == "__main__":
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for name, fn in tests:

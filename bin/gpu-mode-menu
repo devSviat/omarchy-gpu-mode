@@ -42,7 +42,7 @@ def write_atomic(path, text):
     mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".")
     try:
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", newline="") as f:
             f.write(text)
         os.chmod(tmp, mode)
         os.replace(tmp, path)
@@ -61,21 +61,33 @@ def backup(path):
     bak.write_bytes(path.read_bytes())
 
 
+def read_text(path):
+    with open(path, newline="") as f:
+        return f.read()
+
+
+def block_for(lines):
+    cr = "\r" if lines and lines[0].endswith("\r") else ""
+    return [l + cr for l in BLOCK]
+
+
 def install(path):
-    if not path.exists():
+    path = path.resolve()
+    if not path.exists() or path.stat().st_size == 0:
         write_atomic(path, "\n".join(["{", *BLOCK, "}"]) + "\n")
         return
-    text = path.read_text()
+    text = read_text(path)
     lines = text.split("\n")
+    block = block_for(lines)
     found = find_block(lines)
     if found:
         begin, end = found
-        updated = lines[:begin] + BLOCK + lines[end + 1:]
+        updated = lines[:begin] + block + lines[end + 1:]
     else:
         opener = next((i for i, l in enumerate(lines) if l.strip() == "{"), None)
         if opener is None:
             raise SystemExit("gpu-mode-menu: expected a line with a lone '{' opening the file")
-        updated = lines[: opener + 1] + BLOCK + lines[opener + 1:]
+        updated = lines[: opener + 1] + block + lines[opener + 1:]
     new_text = "\n".join(updated)
     if new_text == text:
         return
@@ -84,9 +96,10 @@ def install(path):
 
 
 def remove(path):
+    path = path.resolve()
     if not path.exists():
         return
-    text = path.read_text()
+    text = read_text(path)
     lines = text.split("\n")
     found = find_block(lines)
     if not found:

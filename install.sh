@@ -13,13 +13,17 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ID="sviat.gpu-mode"
 PLUGIN_DIR="$HOME/.config/omarchy/plugins/$PLUGIN_ID"
 
+usage() {
+  awk 'NR > 2 && /^#/ { sub(/^# ?/, ""); print; started = 1; next } started { exit }' "${BASH_SOURCE[0]}"
+}
+
 remove="false"
 
 while (( $# > 0 )); do
   case "$1" in
   --remove) remove="true" ;;
   -h | --help)
-    sed -n '3,9p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
+    usage
     exit 0
     ;;
   *)
@@ -54,7 +58,8 @@ else
 fi
 
 # The shell caches manifests; a stale one would place the plugin on the bar.
-omarchy-shell shell rescanPlugins >/dev/null
+omarchy-shell shell rescanPlugins >/dev/null ||
+  echo "GPU Mode: shell not running, skipped plugin rescan" >&2
 omarchy plugin enable "$PLUGIN_ID"
 "$REPO/bin/gpu-mode-menu" install
 
