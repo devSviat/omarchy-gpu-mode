@@ -55,7 +55,7 @@ test("viewFor shows helper banners", () => {
   const o = M.viewFor(state({ helper: "outdated" }), "eco", REPO)
   assert.equal(o.banner, "helper-outdated")
   assert.equal(o.canApply, false)
-  assert.equal(o.bannerText, "The root helper is out of date. Run: " + INSTALL)
+  assert.equal(o.bannerText, "The root helper differs from this checkout. Review the changes, then run: " + INSTALL)
 })
 
 test("viewFor inconsistent", () => {

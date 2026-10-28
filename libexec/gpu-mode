@@ -17,8 +17,7 @@ PCI_DEVICES = "/sys/bus/pci/devices"
 DRM_CLASS = "/sys/class/drm"
 SUPERGFXCTL = "/usr/bin/supergfxctl"
 INSTALLED_HELPER = Path("/usr/local/libexec/omarchy-gpu-mode/gpu-mode")
-STOCK_HOOK = "/usr/lib/systemd/system-sleep/force-igpu"
-STOCK_HOOK_PATH = STOCK_HOOK
+STOCK_HOOK_PATH = "/usr/lib/systemd/system-sleep/force-igpu"
 HOOK_PATH = "/usr/lib/systemd/system-sleep/omarchy-gpu-mode-igpu"
 DROPIN_PATH = "/etc/systemd/system/supergfxd.service.d/delay-start.conf"
 NVIDIA_VENDOR = "0x10de"
@@ -176,7 +175,7 @@ def state(root, runtime, repo_file):
         "muxPendingReboot": pending,
         "dgpuDisabled": dgpu_disabled(root),
         "externalConnected": external_connected(root),
-        "stockHookPresent": root.p(STOCK_HOOK).exists(),
+        "stockHookPresent": root.p(STOCK_HOOK_PATH).exists(),
         "helper": helper_status(repo_file, root.p(str(INSTALLED_HELPER))),
         "error": error,
     }
@@ -314,12 +313,22 @@ def _write_mux(path, value):
         handle.write(value)
 
 
-def _install(path, data, mode):
+def _ensure_private_dir(directory, owner_uid):
+    directory = Path(directory)
+    directory.mkdir(mode=0o755, parents=True, exist_ok=True)
+    info = os.lstat(directory)
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != owner_uid
+            or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+        raise ApplyError(f"{directory} must be a directory owned by uid {owner_uid} "
+                         "and writable only by its owner")
+
+
+def _install(path, data, mode, owner_uid=0):
     path = Path(path)
     saved = _snapshot_file(path)
     if saved == ("file", data, mode):
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_private_dir(path.parent, owner_uid)
     _atomic_write(path, data, mode)
 
 
@@ -330,7 +339,7 @@ def _remove(path):
         pass
 
 
-def apply_mode(root, mode, reload=lambda: None):
+def apply_mode(root, mode, reload=lambda: None, owner_uid=0):
     if mode not in MODES:
         raise ApplyError(f"unknown mode {mode!r}")
     try:
@@ -362,8 +371,8 @@ def apply_mode(root, mode, reload=lambda: None):
             mux_written = True
             _write_mux(mux_file, str(want_mux))
         if mode == "eco":
-            _install(hook_file, HOOK_SOURCE.encode(), 0o755)
-            _install(dropin_file, DROPIN_SOURCE.encode(), 0o644)
+            _install(hook_file, HOOK_SOURCE.encode(), 0o755, owner_uid)
+            _install(dropin_file, DROPIN_SOURCE.encode(), 0o644, owner_uid)
             _remove(stock_file)
         else:
             _remove(hook_file)
@@ -431,6 +440,11 @@ def main(argv):
     if argv[:1] == ["apply"] and len(argv) == 2 and argv[1] in MODES:
         return _run_root(lambda: apply_mode(Root("/"), argv[1], reload=_daemon_reload))
     if argv == ["normalize"]:
+        # The only environment read, and it can only refuse: normalize belongs to the
+        # sudo install step, never to the polkit action (pkexec sets PKEXEC_UID).
+        if "PKEXEC_UID" in os.environ:
+            print("gpu-mode: normalize is not available through pkexec", file=sys.stderr)
+            return 2
         return _run_root(lambda: normalize(Root("/")))
     print("usage: gpu-mode state | apply <eco|standard|ultimate> | normalize", file=sys.stderr)
     return 2
@@ -444,6 +458,8 @@ def _daemon_reload():
 
 
 def _run_root(action):
+    # pkexec keeps the caller's umask, and directories created here hold root-run files.
+    os.umask(0o022)
     if os.geteuid() != 0:
         print("gpu-mode: must run as root", file=sys.stderr)
         return 1

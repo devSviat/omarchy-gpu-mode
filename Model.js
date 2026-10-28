@@ -54,7 +54,8 @@ function viewFor(state, selected, repoDir) {
         bannerText = "The root helper is not installed. Run: " + installCommand(repoDir)
     } else if (state.helper === "outdated") {
         banner = "helper-outdated"
-        bannerText = "The root helper is out of date. Run: " + installCommand(repoDir)
+        bannerText = "The root helper differs from this checkout. Review the changes, then run: "
+            + installCommand(repoDir)
     } else if (state.error) {
         banner = "error"
         bannerText = state.error

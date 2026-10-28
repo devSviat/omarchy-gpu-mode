@@ -43,9 +43,14 @@ def eco_files(base):
             (gm.HOOK_PATH, gm.DROPIN_PATH)}
 
 
+def apply(base, mode, **kwargs):
+    kwargs.setdefault("owner_uid", os.getuid())
+    gm.apply_mode(gm.Root(base), mode, **kwargs)
+
+
 def run_apply(base, mode):
     calls = []
-    gm.apply_mode(gm.Root(base), mode, reload=lambda: calls.append(1))
+    apply(base, mode, reload=lambda: calls.append(1))
     return calls
 
 
@@ -152,8 +157,7 @@ def test_rollback_on_failure():
     gm._atomic_write = failing
     reloads = []
     try:
-        assert raises_apply(lambda: gm.apply_mode(gm.Root(base), "eco",
-                                                  reload=lambda: reloads.append(1)))
+        assert raises_apply(lambda: apply(base, "eco", reload=lambda: reloads.append(1)))
     finally:
         gm._atomic_write = original
     assert state["failed"]
@@ -211,7 +215,7 @@ def test_reload_failure_rolls_back():
         raise RuntimeError("reload broke")
 
     try:
-        gm.apply_mode(gm.Root(base), "eco", reload=bad)
+        apply(base, "eco", reload=bad)
         raise AssertionError("no error")
     except gm.ApplyError as exc:
         assert "reload broke" in str(exc)
@@ -238,7 +242,7 @@ def test_rollback_continues_after_mux_restore_failure():
 
     gm._write_mux, gm._atomic_write = write, failing
     try:
-        gm.apply_mode(gm.Root(base), "eco")
+        apply(base, "eco")
         raise AssertionError("no error")
     except gm.ApplyError as exc:
         msg = str(exc)
@@ -289,6 +293,55 @@ def test_main_requires_root():
         return
     assert gm.main(["apply", "eco"]) == 1
     assert gm.main(["normalize"]) == 1
+
+
+def test_created_dir_ignores_caller_umask():
+    base = fakeroot.build(conf_mode="Hybrid", mux="1")
+    old = os.umask(0)
+    try:
+        run_apply(base, "eco")
+    finally:
+        os.umask(old)
+    dropin_dir = Path(base, gm.DROPIN_PATH.lstrip("/")).parent
+    assert dropin_dir.stat().st_mode & 0o777 == 0o755
+
+
+def test_writable_parent_refused_before_write():
+    base = fakeroot.build(conf_mode="Hybrid", mux="1")
+    dropin_dir = Path(base, gm.DROPIN_PATH.lstrip("/")).parent
+    dropin_dir.mkdir(parents=True)
+    dropin_dir.chmod(0o777)
+    paths = ("etc/supergfxd.conf", fakeroot.ARMOURY + "/gpu_mux_mode/current_value",
+             gm.HOOK_PATH, gm.DROPIN_PATH)
+    before = snap(base, *paths)
+    written = []
+    original = gm._atomic_write
+
+    def spy(path, data, mode):
+        written.append(str(path))
+        return original(path, data, mode)
+
+    gm._atomic_write = spy
+    try:
+        assert raises_apply(lambda: run_apply(base, "eco"))
+    finally:
+        gm._atomic_write = original
+    assert not any(p.endswith("delay-start.conf") for p in written), written
+    assert snap(base, *paths) == before
+
+
+def test_foreign_owned_parent_refused():
+    base = fakeroot.build(conf_mode="Hybrid", mux="1")
+    assert raises_apply(lambda: apply(base, "eco", owner_uid=os.getuid() + 1))
+    assert not Path(base, gm.DROPIN_PATH.lstrip("/")).exists()
+
+
+def test_normalize_refused_under_pkexec():
+    os.environ["PKEXEC_UID"] = "1000"
+    try:
+        assert gm.main(["normalize"]) == 2
+    finally:
+        del os.environ["PKEXEC_UID"]
 
 
 def test_normalize():

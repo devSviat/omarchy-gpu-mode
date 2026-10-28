@@ -33,6 +33,8 @@ Root step, which installs the privileged helper, the polkit action, and the Eco 
 sudo ./install-root.sh
 ```
 
+The checkout is writable by your user, so anything running as you can change it. Before each `sudo` run, review what changed since you last checked, for example with `git -C <repo> log` and `git -C <repo> diff`.
+
 The root step never changes the GPU mode. It normalises a stale `mode` in `/etc/supergfxd.conf` so that it matches the MUX.
 
 The menu row replaces the stock "Hybrid GPU" row. The installer edits `~/.config/omarchy/extensions/omarchy-menu.jsonc` between `// >>> sviat.gpu-mode` and `// <<< sviat.gpu-mode` markers, and writes a timestamped `.bak` next to the file before each change.

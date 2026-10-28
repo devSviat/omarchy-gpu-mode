@@ -23,6 +23,35 @@ except Exception:
 ' "$1"
 }
 
+# The repo is user-writable, so each source is opened once, without following a
+# symlink at any path component, and installed from that root-owned copy.
+stage_copy() {
+  /usr/bin/python3 -I -c '
+import os, stat, sys
+base, rel, dest = sys.argv[1:4]
+fd = None
+try:
+    fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+    parts = rel.split("/")
+    for part in parts[:-1]:
+        nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        os.close(fd)
+        fd = nxt
+    src = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+    with os.fdopen(src, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            sys.exit(f"install-root.sh: {base}/{rel} is not a regular file")
+        data = handle.read()
+    with open(dest, "xb") as out:
+        out.write(data)
+except OSError as exc:
+    sys.exit(f"install-root.sh: cannot read {base}/{rel}: {exc.strerror}")
+finally:
+    if fd is not None:
+        os.close(fd)
+' "$1" "$2" "$3"
+}
+
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
   return 0
 fi
@@ -75,18 +104,14 @@ if [[ "$remove" == "true" ]]; then
   exit 0
 fi
 
-if [[ ! -f "$REPO/libexec/gpu-mode" || -L "$REPO/libexec/gpu-mode" ]]; then
-  echo "install-root.sh: $REPO/libexec/gpu-mode is not a regular file" >&2
-  exit 1
-fi
-if [[ ! -f "$REPO/polkit/dev.sviat.gpu-mode.policy" ]]; then
-  echo "install-root.sh: $REPO/polkit/dev.sviat.gpu-mode.policy is missing" >&2
-  exit 1
-fi
+stage="$(mktemp -d)"
+trap 'rm -rf -- "$stage"' EXIT
+stage_copy "$REPO" libexec/gpu-mode "$stage/gpu-mode"
+stage_copy "$REPO" polkit/dev.sviat.gpu-mode.policy "$stage/policy"
 
 install -d -o root -g root -m 0755 "$HELPER_DIR"
-install -o root -g root -m 0755 "$REPO/libexec/gpu-mode" "$HELPER"
-install -o root -g root -m 0644 "$REPO/polkit/dev.sviat.gpu-mode.policy" "$POLICY"
+install -o root -g root -m 0755 "$stage/gpu-mode" "$HELPER"
+install -o root -g root -m 0644 "$stage/policy" "$POLICY"
 
 "$HELPER" normalize
 echo "Installed $HELPER and $POLICY."

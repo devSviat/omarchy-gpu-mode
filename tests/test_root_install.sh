@@ -50,6 +50,28 @@ integrated_conf_detected() (
   rm -rf "$d"
   return $f
 )
+stage_copy_refuses_links() (
+  local d rc=0
+  d="$(mktemp -d)"
+  mkdir -p "$d/repo/sub" "$d/out" "$d/elsewhere"
+  printf 'payload' >"$d/repo/sub/file"
+  printf 'secret' >"$d/elsewhere/file"
+  ln -s "$d/elsewhere/file" "$d/repo/sub/link"
+  ln -s "$d/elsewhere" "$d/repo/viadir"
+  mkfifo "$d/repo/sub/fifo"
+  # shellcheck disable=SC1090
+  source "$SCRIPT"
+  set +e
+  stage_copy "$d/repo" sub/file "$d/out/a" && [[ $(cat "$d/out/a") == payload ]] || rc=1
+  stage_copy "$d/repo" sub/link "$d/out/b" && rc=1
+  stage_copy "$d/repo" viadir/file "$d/out/c" && rc=1
+  stage_copy "$d/repo" sub/fifo "$d/out/d" && rc=1
+  stage_copy "$d/repo" sub "$d/out/e" && rc=1
+  stage_copy "$d/repo" sub/missing "$d/out/f" && rc=1
+  [[ ! -e $d/out/b && ! -e $d/out/c && ! -e $d/out/d && ! -e $d/out/e ]] || rc=1
+  rm -rf "$d"
+  return $rc
+)
 shellcheck_clean() {
   command -v shellcheck >/dev/null || return 0
   shellcheck "$SCRIPT"
@@ -63,6 +85,7 @@ check "install-root.sh refuses without root" refuses_without_root
 check "install-root.sh rejects unknown option" unknown_option_rejected
 check "--help mentions --remove" help_mentions_remove
 check "Integrated conf detection" integrated_conf_detected
+check "stage_copy refuses symlinks and non-regular files" stage_copy_refuses_links
 check "shellcheck (skipped if absent)" shellcheck_clean
 
 exit "$failed"

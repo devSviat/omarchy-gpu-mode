@@ -98,7 +98,7 @@ Item {
     helperProc.stderrText = ""
     helperProc.exitCode = -1
     helperProc.streamDone = false
-    helperProc.command = ["pkexec", "/usr/local/libexec/omarchy-gpu-mode/gpu-mode", "apply", mode]
+    helperProc.command = ["/usr/bin/pkexec", "/usr/local/libexec/omarchy-gpu-mode/gpu-mode", "apply", mode]
     helperProc.running = true
   }
 
