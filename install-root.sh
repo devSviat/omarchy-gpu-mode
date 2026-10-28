@@ -23,6 +23,13 @@ except Exception:
 ' "$1"
 }
 
+refuse_remove_in_eco() {
+  if conf_is_integrated "$1"; then
+    echo "GPU Mode: switch to Standard or Ultimate before removing (Eco needs the sleep hook)." >&2
+    return 1
+  fi
+}
+
 # The repo is user-writable, so each source is opened once, without following a
 # symlink at any path component, and installed from that root-owned copy.
 stage_copy() {
@@ -86,10 +93,7 @@ if (( EUID != 0 )); then
 fi
 
 if [[ "$remove" == "true" ]]; then
-  if conf_is_integrated /etc/supergfxd.conf; then
-    echo "GPU Mode: switch to Standard or Ultimate before removing (Eco needs the sleep hook)." >&2
-    exit 1
-  fi
+  refuse_remove_in_eco /etc/supergfxd.conf || exit 1
   rm -f "$HELPER" "$POLICY" "$HOOK"
   rmdir "$HELPER_DIR" 2>/dev/null || true
   if [[ -e "$DROPIN" ]]; then

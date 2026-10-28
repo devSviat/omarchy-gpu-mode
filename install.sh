@@ -5,7 +5,7 @@
 # puts nothing on the bar. The root step is printed at the end.
 #
 #   ./install.sh           link, enable, add the menu row
-#   ./install.sh --remove  remove the menu row, disable and unlink
+#   ./install.sh --remove  remove the menu row, disable and unlink (refuses in Eco)
 
 set -euo pipefail
 
@@ -13,9 +13,16 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ID="sviat.gpu-mode"
 PLUGIN_DIR="$HOME/.config/omarchy/plugins/$PLUGIN_ID"
 
+# shellcheck source=install-root.sh
+source "$REPO/install-root.sh"
+
 usage() {
   awk 'NR > 2 && /^#/ { sub(/^# ?/, ""); print; started = 1; next } started { exit }' "${BASH_SOURCE[0]}"
 }
+
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
 
 remove="false"
 
@@ -35,6 +42,7 @@ while (( $# > 0 )); do
 done
 
 if [[ $remove == "true" ]]; then
+  refuse_remove_in_eco /etc/supergfxd.conf || exit 1
   "$REPO/bin/gpu-mode-menu" remove
   omarchy plugin disable "$PLUGIN_ID" || true
   if [[ -L $PLUGIN_DIR ]]; then
@@ -42,7 +50,7 @@ if [[ $remove == "true" ]]; then
     echo "  plugin   removed $PLUGIN_DIR"
   fi
   echo
-  echo "Root files stay until you remove them (in Standard or Ultimate; it refuses in Eco):"
+  echo "If the root files are still installed, remove them with:"
   echo "  sudo $REPO/install-root.sh --remove"
   exit 0
 fi
@@ -60,8 +68,10 @@ fi
 # The shell caches manifests; a stale one would place the plugin on the bar.
 omarchy-shell shell rescanPlugins >/dev/null ||
   echo "GPU Mode: shell not running, skipped plugin rescan" >&2
-omarchy plugin enable "$PLUGIN_ID"
 "$REPO/bin/gpu-mode-menu" install
+if ! omarchy plugin enable "$PLUGIN_ID"; then
+  echo "GPU Mode: could not enable the plugin (is the shell running?)" >&2
+fi
 
 echo
 echo "Root step (installs the helper and polkit action):"
