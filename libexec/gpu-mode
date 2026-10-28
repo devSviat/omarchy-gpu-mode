@@ -1,0 +1,172 @@
+#!/usr/bin/python3 -I
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+MODES = {"eco": "Integrated", "standard": "Hybrid", "ultimate": "AsusMuxDgpu"}
+_BY_CONF = {conf: name for name, conf in MODES.items()}
+
+CONF_PATH = "/etc/supergfxd.conf"
+ARMOURY = "/sys/class/firmware-attributes/asus-armoury/attributes"
+WMI_MUX = "/sys/devices/platform/asus-nb-wmi/gpu_mux_mode"
+PCI_DEVICES = "/sys/bus/pci/devices"
+DRM_CLASS = "/sys/class/drm"
+SUPERGFXCTL = "/usr/bin/supergfxctl"
+INSTALLED_HELPER = Path("/usr/local/libexec/omarchy-gpu-mode/gpu-mode")
+STOCK_HOOK = "/usr/lib/systemd/system-sleep/force-igpu"
+NVIDIA_VENDOR = "0x10de"
+
+
+class ConfError(Exception):
+    pass
+
+
+class Root:
+    def __init__(self, base="/"):
+        self.base = Path(base)
+
+    def p(self, abs_path):
+        return self.base / abs_path.lstrip("/")
+
+
+def _read(path):
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return None
+
+
+def read_conf(root):
+    path = root.p(CONF_PATH)
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise ConfError(f"cannot read {CONF_PATH}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfError(f"{CONF_PATH} is not a JSON object")
+    return data
+
+
+def mux_path(root):
+    for candidate in (f"{ARMOURY}/gpu_mux_mode/current_value", WMI_MUX):
+        path = root.p(candidate)
+        if path.is_file():
+            return path
+    return None
+
+
+def read_mux(root):
+    path = mux_path(root)
+    value = _read(path) if path else None
+    return int(value) if value in ("0", "1") else None
+
+
+def mux_pending(root):
+    return _read(root.p(f"{ARMOURY}/pending_reboot")) == "1"
+
+
+def dgpu_disabled(root):
+    value = _read(root.p(f"{ARMOURY}/dgpu_disable/current_value"))
+    return {"0": False, "1": True}.get(value)
+
+
+def nvidia_card(root):
+    devices = root.p(PCI_DEVICES)
+    if not devices.is_dir():
+        return None
+    for dev in sorted(devices.iterdir()):
+        if _read(dev / "vendor") != NVIDIA_VENDOR:
+            continue
+        if not (_read(dev / "class") or "").startswith("0x03"):
+            continue
+        cards = sorted((dev / "drm").glob("card*")) if (dev / "drm").is_dir() else []
+        cards = [c for c in cards if c.name[4:].isdigit()]
+        if cards:
+            return cards[0].name
+    return None
+
+
+def external_connected(root):
+    card = nvidia_card(root)
+    if card is None:
+        return []
+    found = []
+    for entry in sorted(root.p(DRM_CLASS).glob(f"{card}-*")):
+        connector = entry.name[len(card) + 1:]
+        if connector.startswith("eDP"):
+            continue
+        if _read(entry / "status") == "connected":
+            found.append(connector)
+    return found
+
+
+def runtime_mode(timeout=3.0):
+    # A wedged supergfxd blocks its clients, so the call must be bounded.
+    try:
+        done = subprocess.run([SUPERGFXCTL, "-g"], capture_output=True, text=True,
+                              timeout=timeout)
+    except Exception:
+        return None
+    if done.returncode != 0:
+        return None
+    return done.stdout.strip() or None
+
+
+def derive_state(conf_mode, mux, runtime, nvidia_present, pending):
+    if mux == 0:
+        active = "ultimate"
+    elif runtime == "Integrated" or (runtime is None and not nvidia_present):
+        active = "eco"
+    else:
+        active = "standard"
+    # supergfxd itself downgrades AsusMuxDgpu to Hybrid at boot when the MUX is in Optimus.
+    if conf_mode == "AsusMuxDgpu" and mux == 1:
+        configured = "standard"
+    else:
+        configured = _BY_CONF.get(conf_mode, "unknown")
+    inconsistent = pending or (configured != "unknown" and configured != active)
+    return {"active": active, "configured": configured, "inconsistent": inconsistent}
+
+
+def helper_status(repo_file, installed):
+    try:
+        installed_bytes = Path(installed).read_bytes()
+    except OSError:
+        return "missing"
+    return "current" if installed_bytes == Path(repo_file).read_bytes() else "outdated"
+
+
+def state(root, runtime, repo_file):
+    error = ""
+    try:
+        conf_mode = read_conf(root).get("mode")
+    except ConfError as exc:
+        conf_mode, error = None, str(exc)
+    mux = read_mux(root)
+    pending = mux_pending(root)
+    derived = derive_state(conf_mode, mux, runtime, nvidia_card(root) is not None, pending)
+    return {
+        "version": 1,
+        **derived,
+        "mux": mux,
+        "muxPendingReboot": pending,
+        "dgpuDisabled": dgpu_disabled(root),
+        "externalConnected": external_connected(root),
+        "stockHookPresent": root.p(STOCK_HOOK).exists(),
+        "helper": helper_status(repo_file, root.p(str(INSTALLED_HELPER))),
+        "error": error,
+    }
+
+
+def main(argv):
+    if argv[:1] == ["state"]:
+        result = state(Root("/"), runtime_mode(), Path(__file__).resolve())
+        print(json.dumps(result, separators=(",", ":")))
+        return 0
+    print("usage: gpu-mode state", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
