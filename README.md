@@ -1,5 +1,7 @@
 # GPU Mode for Omarchy
 
+![GPU Mode window](preview.png)
+
 Switch an ASUS laptop between three GPU modes from the Omarchy menu, G-Helper style. Every switch is followed immediately by a reboot, and takes exactly one.
 
 The plugin is a small window (`Trigger > Hardware > GPU Mode`) on top of `supergfxd`. It is a single-purpose tool: no fan, lighting, power-limit or charge-limit control.
@@ -35,17 +37,23 @@ Other ASUS models with a MUX should behave the same through `supergfxd`, but are
 
 ## Install
 
-User step, which links the plugin, enables it and adds the menu row:
+From the Omarchy plugin catalog:
 
 ```
+omarchy plugin add https://github.com/devSviat/omarchy-gpu-mode --enable
+~/.config/omarchy/plugins/sviat.gpu-mode/install.sh
+sudo ~/.config/omarchy/plugins/sviat.gpu-mode/install-root.sh
+```
+
+Or from a checkout (`install.sh` links the checkout as the plugin):
+
+```
+git clone https://github.com/devSviat/omarchy-gpu-mode && cd omarchy-gpu-mode
 ./install.sh
-```
-
-Root step, which installs the privileged helper and the polkit action and normalises the config. The Eco drop-in is not installed here; a switch to Eco installs it:
-
-```
 sudo ./install-root.sh
 ```
+
+`install.sh` enables the plugin and adds the menu row. `install-root.sh` installs the privileged helper and the polkit action and normalises the config. The Eco drop-in is not installed here; a switch to Eco installs it.
 
 Reboot to finish (Eco uses the new firmware power-off from the next boot).
 
@@ -95,6 +103,8 @@ Do not use `supergfxd.mode=` on the kernel command line for this. `supergfxd` wr
    ```
    ./install.sh --remove
    ```
+
+   For a catalog install, run the same script from `~/.config/omarchy/plugins/sviat.gpu-mode/` and then `omarchy plugin remove sviat.gpu-mode`.
 
 ## Development
 
