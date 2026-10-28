@@ -72,10 +72,66 @@ stage_copy_refuses_links() (
   rm -rf "$d"
   return $rc
 )
-remove_deletes_old_hook() {
-  grep -qF 'OLD_HOOK="/usr/lib/systemd/system-sleep/omarchy-gpu-mode-igpu"' "$SCRIPT" &&
-    grep -A3 -F 'refuse_remove_in_eco /etc/supergfxd.conf || exit 1' "$SCRIPT" |
-    grep -qE '^ *rm -f .*"\$OLD_HOOK"'
+fake_root() {
+  local d="$1" mode="$2" helper_rc="${3:-0}"
+  mkdir -p "$d/etc" "$d/usr/local/libexec/omarchy-gpu-mode" "$d/usr/share/polkit-1/actions" \
+    "$d/usr/lib/systemd/system-sleep" "$d/etc/systemd/system/supergfxd.service.d"
+  printf '{"mode":"%s","hotplug_type":"Asus"}' "$mode" >"$d/etc/supergfxd.conf"
+  printf '#!/bin/bash\n[[ $* == restore-hotplug ]] && echo called >"%s/called"\nexit %s\n' \
+    "$d" "$helper_rc" >"$d/usr/local/libexec/omarchy-gpu-mode/gpu-mode"
+  chmod +x "$d/usr/local/libexec/omarchy-gpu-mode/gpu-mode"
+  : >"$d/usr/share/polkit-1/actions/dev.sviat.gpu-mode.policy"
+  : >"$d/usr/lib/systemd/system-sleep/omarchy-gpu-mode-igpu"
+  : >"$d/etc/systemd/system/supergfxd.service.d/delay-start.conf"
+}
+root_files_left() {
+  local d="$1"
+  [[ -e $d/usr/local/libexec/omarchy-gpu-mode/gpu-mode && -e $d/usr/share/polkit-1/actions/dev.sviat.gpu-mode.policy &&
+    -e $d/usr/lib/systemd/system-sleep/omarchy-gpu-mode-igpu && -e $d/etc/systemd/system/supergfxd.service.d/delay-start.conf ]]
+}
+remove_on_fake_root() (
+  local d rc=0
+  d="$(mktemp -d)"
+  fake_root "$d" Hybrid
+  # shellcheck disable=SC1090
+  source "$SCRIPT"
+  set +e
+  remove_root_files "$d" || rc=1
+  [[ -f $d/called && $dropin_removed == true ]] || rc=1
+  [[ ! -e $d/usr/local/libexec/omarchy-gpu-mode && ! -e $d/usr/share/polkit-1/actions/dev.sviat.gpu-mode.policy ]] || rc=1
+  [[ ! -e $d/usr/lib/systemd/system-sleep/omarchy-gpu-mode-igpu ]] || rc=1
+  [[ ! -e $d/etc/systemd/system/supergfxd.service.d ]] || rc=1
+  rm -rf "$d"
+  return $rc
+)
+remove_refused_before_any_change() (
+  local d rc=0
+  # shellcheck disable=SC1090
+  source "$SCRIPT"
+  set +e
+  d="$(mktemp -d)"
+  fake_root "$d" Integrated
+  remove_root_files "$d" && rc=1
+  root_files_left "$d" && [[ ! -e $d/called ]] || rc=1
+  rm -rf "$d"
+  d="$(mktemp -d)"
+  fake_root "$d" Hybrid 2
+  remove_root_files "$d" && rc=1
+  root_files_left "$d" || rc=1
+  rm -rf "$d"
+  d="$(mktemp -d)"
+  fake_root "$d" Hybrid
+  rm "$d/usr/local/libexec/omarchy-gpu-mode/gpu-mode"
+  remove_root_files "$d" && rc=1
+  [[ -e $d/usr/share/polkit-1/actions/dev.sviat.gpu-mode.policy ]] || rc=1
+  rm -rf "$d"
+  return $rc
+)
+main_remove_uses_function() {
+  grep -A1 -F 'if [[ "$remove" == "true" ]]; then' "$SCRIPT" | grep -qF 'remove_root_files "" || exit 1'
+}
+reboot_hint_after_install() {
+  tail -n 3 "$SCRIPT" | grep -qF 'echo "Reboot to finish (Eco uses the new firmware power-off from the next boot)."'
 }
 shellcheck_clean() {
   command -v shellcheck >/dev/null || return 0
@@ -91,7 +147,10 @@ check "install-root.sh rejects unknown option" unknown_option_rejected
 check "--help mentions --remove" help_mentions_remove
 check "Integrated conf detection" integrated_conf_detected
 check "stage_copy refuses symlinks and non-regular files" stage_copy_refuses_links
-check "--remove deletes the old sleep hook" remove_deletes_old_hook
+check "--remove on a fake root resets hotplug and removes every root file" remove_on_fake_root
+check "--remove refuses in Eco or when hotplug cannot be reset, before any change" remove_refused_before_any_change
+check "--remove runs the tested function" main_remove_uses_function
+check "install prints the reboot hint" reboot_hint_after_install
 check "shellcheck (skipped if absent)" shellcheck_clean
 
 exit "$failed"

@@ -4,9 +4,16 @@
 # polkit action. Run with sudo. Never changes the GPU mode.
 #
 #   sudo ./install-root.sh           install helper and policy, then normalize
-#   sudo ./install-root.sh --remove  remove helper, policy, drop-in and the old sleep hook
+#   sudo ./install-root.sh --remove  reset hotplug_type, remove helper, policy, drop-in and the old sleep hook
 
 set -euo pipefail
+
+CONF="/etc/supergfxd.conf"
+HELPER_DIR="/usr/local/libexec/omarchy-gpu-mode"
+HELPER="$HELPER_DIR/gpu-mode"
+POLICY="/usr/share/polkit-1/actions/dev.sviat.gpu-mode.policy"
+OLD_HOOK="/usr/lib/systemd/system-sleep/omarchy-gpu-mode-igpu"
+DROPIN="/etc/systemd/system/supergfxd.service.d/delay-start.conf"
 
 usage() {
   awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; started = 1; next } started { exit }' "${BASH_SOURCE[0]}"
@@ -59,16 +66,30 @@ finally:
 ' "$1" "$2" "$3"
 }
 
+# $1 is an alternative root for tests; empty means /. Sets dropin_removed.
+remove_root_files() {
+  local root="$1"
+  dropin_removed="false"
+  refuse_remove_in_eco "$root$CONF" || return 1
+  # The stock toggle cannot leave Eco while supergfxd uses "Asus", so it is reset first.
+  if [[ ! -x "$root$HELPER" ]] || ! "$root$HELPER" restore-hotplug; then
+    echo "GPU Mode: could not reset hotplug_type in $CONF. Run: sudo $0 (to update the helper), then --remove again." >&2
+    return 1
+  fi
+  rm -f "$root$HELPER" "$root$POLICY" "$root$OLD_HOOK"
+  rmdir "$root$HELPER_DIR" 2>/dev/null || true
+  if [[ -e "$root$DROPIN" ]]; then
+    rm -f "$root$DROPIN"
+    rmdir "$(dirname "$root$DROPIN")" 2>/dev/null || true
+    dropin_removed="true"
+  fi
+}
+
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
   return 0
 fi
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HELPER_DIR="/usr/local/libexec/omarchy-gpu-mode"
-HELPER="$HELPER_DIR/gpu-mode"
-POLICY="/usr/share/polkit-1/actions/dev.sviat.gpu-mode.policy"
-OLD_HOOK="/usr/lib/systemd/system-sleep/omarchy-gpu-mode-igpu"
-DROPIN="/etc/systemd/system/supergfxd.service.d/delay-start.conf"
 
 remove="false"
 
@@ -93,18 +114,12 @@ if (( EUID != 0 )); then
 fi
 
 if [[ "$remove" == "true" ]]; then
-  refuse_remove_in_eco /etc/supergfxd.conf || exit 1
-  rm -f "$HELPER" "$POLICY" "$OLD_HOOK"
-  rmdir "$HELPER_DIR" 2>/dev/null || true
-  if [[ -e "$DROPIN" ]]; then
-    rm -f "$DROPIN"
-    rmdir "$(dirname "$DROPIN")" 2>/dev/null || true
-    if ! systemctl daemon-reload; then
-      echo "GPU Mode: files removed, but systemctl daemon-reload failed; run it manually." >&2
-      exit 1
-    fi
+  remove_root_files "" || exit 1
+  if [[ $dropin_removed == "true" ]] && ! /usr/bin/systemctl daemon-reload; then
+    echo "GPU Mode: files removed, but systemctl daemon-reload failed; run it manually." >&2
+    exit 1
   fi
-  echo "Removed the GPU mode helper, policy and drop-in, and the old sleep hook if present."
+  echo "Reset hotplug_type to None and removed the GPU mode helper, policy and drop-in, and the old sleep hook if present."
   exit 0
 fi
 
@@ -119,3 +134,4 @@ install -o root -g root -m 0644 "$stage/policy" "$POLICY"
 
 "$HELPER" normalize
 echo "Installed $HELPER and $POLICY."
+echo "Reboot to finish (Eco uses the new firmware power-off from the next boot)."
