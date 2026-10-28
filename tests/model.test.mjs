@@ -64,6 +64,8 @@ test("viewFor inconsistent", () => {
   assert.equal(v.banner, "inconsistent")
   assert.equal(v.bannerText, "A GPU switch is waiting for a reboot.")
   assert.equal(v.canApply, false)
+  const p = M.viewFor(state({ inconsistent: true, pendingMode: "ultimate" }), "eco", REPO)
+  assert.equal(p.bannerText, "A switch to Ultimate is waiting for a reboot.")
 })
 
 test("viewFor error banner", () => {
@@ -87,21 +89,25 @@ test("monitor warning only for eco with connections", () => {
   assert.equal(v.monitorText, "HDMI-A-1 is connected. External outputs stop working in Eco.")
   assert.equal(M.viewFor(s, "standard", REPO).showMonitorWarning, false)
   assert.equal(M.viewFor(state(), "eco", REPO).showMonitorWarning, false)
-  const two = M.viewFor(state({ externalConnected: ["HDMI-A-1", "DP-2"] }), "eco", REPO)
-  assert.equal(two.monitorText, "HDMI-A-1, DP-2 is connected. External outputs stop working in Eco.")
+  const two = M.viewFor(state({ externalConnected: ["HDMI-A-1", "DP-1"] }), "eco", REPO)
+  assert.equal(two.monitorText, "HDMI-A-1 and DP-1 are connected. External outputs stop working in Eco.")
+  const three = M.viewFor(state({ externalConnected: ["HDMI-A-1", "DP-1", "DP-2"] }), "eco", REPO)
+  assert.equal(three.monitorText, "HDMI-A-1, DP-1, and DP-2 are connected. External outputs stop working in Eco.")
 })
 
 test("noticeFor stock hook", () => {
   const text = "Omarchy's force-igpu sleep hook is back next to GPU Mode's. Run: " + INSTALL
-  assert.equal(M.noticeFor(state({ active: "eco", stockHookPresent: true }), REPO), text)
-  assert.equal(M.noticeFor(state({ active: "standard", stockHookPresent: true }), REPO), "")
-  assert.equal(M.noticeFor(state({ active: "eco", stockHookPresent: false }), REPO), "")
+  assert.equal(M.noticeFor(state({ active: "eco", stockHookPresent: true, ownHookPresent: true }), REPO), text)
+  assert.equal(M.noticeFor(state({ active: "standard", stockHookPresent: true, ownHookPresent: true }), REPO), "")
+  assert.equal(M.noticeFor(state({ active: "eco", stockHookPresent: false, ownHookPresent: true }), REPO), "")
+  assert.equal(M.noticeFor(state({ active: "eco", stockHookPresent: true, ownHookPresent: false }), REPO), "")
 })
 
-test("classifyHelperExit treats 126/127 as dismissed", () => {
+test("classifyHelperExit: 126 is dismissed, 127 is an error", () => {
   assert.equal(M.classifyHelperExit(0, "").kind, "ok")
   assert.equal(M.classifyHelperExit(126, "").kind, "dismissed")
-  assert.equal(M.classifyHelperExit(127, "").kind, "dismissed")
+  assert.deepEqual({ ...M.classifyHelperExit(127, "") }, { kind: "error", message: "Authorisation failed" })
+  assert.deepEqual({ ...M.classifyHelperExit(127, "Not authorized\n") }, { kind: "error", message: "Not authorized" })
   const e = M.classifyHelperExit(1, "gpu-mode: config unreadable\n")
   assert.equal(e.kind, "error")
   assert.equal(e.message, "gpu-mode: config unreadable")

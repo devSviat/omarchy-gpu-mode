@@ -46,6 +46,12 @@ function installCommand(repoDir) {
     return "sudo " + repoDir + "/install-root.sh"
 }
 
+function joinNames(names) {
+    if (names.length <= 2)
+        return names.join(" and ")
+    return names.slice(0, -1).join(", ") + ", and " + names[names.length - 1]
+}
+
 function viewFor(state, selected, repoDir) {
     var banner = "none"
     var bannerText = ""
@@ -61,7 +67,10 @@ function viewFor(state, selected, repoDir) {
         bannerText = state.error
     } else if (state.inconsistent) {
         banner = "inconsistent"
-        bannerText = "A GPU switch is waiting for a reboot."
+        var pending = modeInfo(state.pendingMode)
+        bannerText = pending
+            ? "A switch to " + pending.label + " is waiting for a reboot."
+            : "A GPU switch is waiting for a reboot."
     }
 
     var external = state.externalConnected || []
@@ -73,25 +82,29 @@ function viewFor(state, selected, repoDir) {
         canApply: banner === "none" && selected !== state.active,
         showMonitorWarning: showMonitorWarning,
         monitorText: showMonitorWarning
-            ? external.join(", ") + " is connected. External outputs stop working in Eco."
+            ? joinNames(external) + (external.length === 1 ? " is" : " are")
+                + " connected. External outputs stop working in Eco."
             : "",
         currentText: "Now: " + MODES[state.active].label
     }
 }
 
 function noticeFor(state, repoDir) {
-    if (!state.stockHookPresent || state.active !== "eco")
+    if (!state.stockHookPresent || !state.ownHookPresent || state.active !== "eco")
         return ""
     return "Omarchy's force-igpu sleep hook is back next to GPU Mode's. Run: " + installCommand(repoDir)
 }
 
-// 126/127 come from pkexec when the user dismisses the auth dialog or none is available.
+// pkexec exits 126 when the user dismisses the auth dialog and 127 when
+// authorisation fails or cannot be obtained.
 function classifyHelperExit(code, stderr) {
     var message = String(stderr || "").trim()
     if (code === 0)
         return { kind: "ok", message: "" }
-    if (code === 126 || code === 127)
+    if (code === 126)
         return { kind: "dismissed", message: message }
+    if (code === 127)
+        return { kind: "error", message: message || "Authorisation failed" }
     return { kind: "error", message: message }
 }
 

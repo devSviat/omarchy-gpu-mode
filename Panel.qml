@@ -18,6 +18,7 @@ Item {
   property var gpuState: null
   property string selected: "standard"
   property string message: ""
+  property bool messageInfo: false
   property bool rebootScheduled: false
   property string phase: ""
   property string revertTarget: ""
@@ -29,7 +30,8 @@ Item {
   readonly property var view: gpuState ? Model.viewFor(gpuState, selected, repoDir) : null
   readonly property bool inconsistent: view !== null && view.banner === "inconsistent"
   readonly property string notice: gpuState ? Model.noticeFor(gpuState, repoDir) : ""
-  readonly property bool canPrimary: !busy && view !== null && (inconsistent || view.canApply)
+  readonly property bool canPrimary: !busy && !rebootScheduled && view !== null
+    && (inconsistent || view.canApply)
   readonly property string bannerText: view ? view.bannerText : ""
   readonly property string fontFamily: Style.font.family
 
@@ -39,13 +41,18 @@ Item {
     })
   }
 
+  function say(text, info) {
+    root.message = text
+    root.messageInfo = info === true
+  }
+
   function open(payloadJson) {
     if (helperProc.running || rebootProc.running) {
       root.opened = true
       focusKeys()
       return
     }
-    root.message = ""
+    say("")
     root.rebootScheduled = false
     root.phase = ""
     root.busy = false
@@ -65,6 +72,12 @@ Item {
     else close()
   }
 
+  // Hiding unloads this Item, so the result of an in-flight action would be lost;
+  // the user shell cannot signal the root helper to stop.
+  function dismissIfIdle() {
+    if (!root.busy) dismiss()
+  }
+
   function loadState() {
     if (stateProc.running) return
     stateProc.command = [root.repoDir + "/libexec/gpu-mode", "state"]
@@ -76,7 +89,7 @@ Item {
     var parsed = Model.parseState(raw)
     if (parsed === null) {
       root.gpuState = null
-      root.message = "Could not read the GPU state."
+      say("Could not read the GPU state.")
       return
     }
     root.gpuState = parsed
@@ -93,7 +106,7 @@ Item {
   function runHelper(mode, nextPhase) {
     if (!Model.applyGuard(root.busy)) return
     root.busy = true
-    root.message = ""
+    say("")
     root.phase = nextPhase
     helperProc.stderrText = ""
     helperProc.exitCode = -1
@@ -104,7 +117,7 @@ Item {
 
   function startReboot(nextPhase) {
     root.busy = true
-    root.message = ""
+    say("")
     root.phase = nextPhase
     rebootProc.exitCode = -1
     rebootProc.command = ["/usr/bin/omarchy-system-reboot"]
@@ -134,47 +147,47 @@ Item {
     root.phase = ""
     if (finished === "apply") {
       if (result.kind === "ok") startReboot("reboot-after-apply")
-      else if (result.kind === "error") root.message = result.message || "The GPU switch failed."
+      else if (result.kind === "error") say(result.message || "The GPU switch failed.")
       return
     }
     if (finished === "revert-manual") {
       if (result.kind === "ok") {
-        root.message = "The pending switch was reverted."
+        say("The pending switch was reverted.", true)
         loadState()
       } else if (result.kind === "error") {
-        root.message = result.message || "Could not revert the switch."
+        say(result.message || "Could not revert the switch.")
       }
       return
     }
     if (finished === "revert-after-reboot-failure") {
       if (result.kind === "ok") {
-        root.message = "Could not schedule the reboot; the switch was reverted."
+        say("Could not schedule the reboot; the switch was reverted.")
         loadState()
       } else {
-        root.message = "Could not schedule the reboot, and the revert failed: "
+        say("Could not schedule the reboot, and the revert failed: "
           + (result.message || "authentication was dismissed")
-          + ". The new mode will apply at the next reboot."
+          + ". The new mode will apply at the next reboot.")
       }
     }
   }
 
-  function rebootFinished(code) {
+  function rebootFinished(code, failureMessage) {
     var finished = root.phase
     root.busy = false
     root.phase = ""
     if (code === 0) {
       root.rebootScheduled = true
-      root.message = "Rebooting…"
+      say("Rebooting…", true)
       return
     }
     if (finished === "reboot-after-apply") runHelper(root.revertTarget, "revert-after-reboot-failure")
-    else root.message = "Could not schedule the reboot."
+    else say(failureMessage || "Could not schedule the reboot.")
   }
 
   function processStopped(failureMessage) {
     root.busy = false
     root.phase = ""
-    root.message = failureMessage
+    say(failureMessage)
   }
 
   Process {
@@ -185,7 +198,7 @@ Item {
     }
     onExited: function(exitCode) {
       if (root.opened && exitCode !== 0 && root.gpuState === null)
-        root.message = "Could not read the GPU state."
+        root.say("Could not read the GPU state.")
     }
   }
 
@@ -229,7 +242,7 @@ Item {
       if (running) return
       Qt.callLater(function() {
         if (rebootProc.exitCode < 0 && root.busy && root.phase.indexOf("reboot") === 0)
-          root.processStopped("Could not run the reboot command.")
+          root.rebootFinished(-1, "Could not run the reboot command.")
       })
     }
   }
@@ -249,16 +262,14 @@ Item {
 
       MouseArea {
         anchors.fill: parent
-        // Hiding unloads this Item and kills in-flight helper processes.
-        onClicked: if (!root.busy) root.dismiss()
+        onClicked: root.dismissIfIdle()
       }
     }
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      // Hiding unloads this Item and kills in-flight helper processes.
-      onCloseRequested: if (!root.busy) root.dismiss()
+      onCloseRequested: root.dismissIfIdle()
       onMoveRequested: function(dx, dy) { root.moveSelection(dx) }
       onReturnRequested: root.primaryAction()
 
@@ -376,7 +387,7 @@ Item {
             visible: root.message !== ""
             textFormat: Text.PlainText
             text: root.message
-            color: root.rebootScheduled ? Color.popups.text : Color.urgent
+            color: root.messageInfo ? Color.popups.text : Color.urgent
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
             wrapMode: Text.Wrap
