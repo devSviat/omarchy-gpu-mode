@@ -111,9 +111,9 @@ Omarchy menu row ──summon──▶ Panel.qml (window, variant B)
 ```
 
 ### State the UI reads (all without root)
-- **Active mode:** `supergfxctl -g`, cross-checked against the live MUX value.
-- **MUX:** the current value, which the derivation trusts for "active" because the existing config can be stale (`AsusMuxDgpu` while the MUX is Optimus). The installer normalises that config once.
-- **Inconsistent state:** the configured mode or the kernel's `pending_reboot` disagrees with what is active. It happens only if a reboot after a switch did not take place, or someone edited the config by hand. The window then shows "A GPU switch is waiting for a reboot" with **Reboot now** and **Revert**; Revert is the helper called with the active mode. This is a recovery path, not a feature. Whether `current_value` shows a newly written MUX before the reboot is checked on the hardware.
+- **Active mode:** `supergfxctl -g` first (`Integrated` → Eco, `Hybrid` → Standard, `AsusMuxDgpu` → Ultimate), because it reports the mode the machine booted with while the MUX value may already show a written switch. Only when it fails or reports something else does the derivation fall back to the MUX: `0` → Ultimate; `1` → Eco if no NVIDIA device is visible, else Standard.
+- **MUX:** the current value. The existing config can be stale (`AsusMuxDgpu` while the MUX is Optimus), which counts as Standard unless a switch is pending. The installer normalises that config once.
+- **Inconsistent state:** the root-owned marker `/run/omarchy-gpu-mode/pending` exists, or the configured mode disagrees with what is active. The helper writes the marker (the mode the current boot started in) on every switch away from that mode and removes it on a switch back; `/run` is cleared by the reboot. The kernel's `pending_reboot` is still reported but does not drive this state. It happens only if a reboot after a switch did not take place, or someone edited the config by hand. The window then shows "A GPU switch is waiting for a reboot" with **Reboot now** and **Revert**; Revert is the helper called with the active mode. This is a recovery path, not a feature. Whether `current_value` shows a newly written MUX before the reboot is checked on the hardware.
 - **Monitor warning:** shown when the target is Eco and any non-eDP connector of the NVIDIA DRM card (found by PCI vendor `0x10de`, not by card number) has `status = connected`.
 
 ### Root helper

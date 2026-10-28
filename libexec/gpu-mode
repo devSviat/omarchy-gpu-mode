@@ -20,6 +20,7 @@ INSTALLED_HELPER = Path("/usr/local/libexec/omarchy-gpu-mode/gpu-mode")
 STOCK_HOOK_PATH = "/usr/lib/systemd/system-sleep/force-igpu"
 HOOK_PATH = "/usr/lib/systemd/system-sleep/omarchy-gpu-mode-igpu"
 DROPIN_PATH = "/etc/systemd/system/supergfxd.service.d/delay-start.conf"
+PENDING_MARKER = "/run/omarchy-gpu-mode/pending"
 NVIDIA_VENDOR = "0x10de"
 
 
@@ -131,15 +132,26 @@ def runtime_mode(timeout=3.0, cmd=(SUPERGFXCTL, "-g")):
     return done.stdout.strip() or None
 
 
-def derive_state(conf_mode, mux, runtime, nvidia_present, pending):
+def derive_active(mux, runtime, nvidia_present):
+    # supergfxd reports the mode it booted with, while the MUX value may already
+    # show a switch that waits for a reboot.
+    if runtime in _BY_CONF:
+        return _BY_CONF[runtime]
     if mux == 0:
-        active = "ultimate"
-    elif runtime == "Integrated" or (runtime is None and not nvidia_present):
-        active = "eco"
-    else:
-        active = "standard"
+        return "ultimate"
+    return "standard" if nvidia_present else "eco"
+
+
+def pending_marker(root):
+    value = _read(root.p(PENDING_MARKER))
+    return value if value in MODES else None
+
+
+def derive_state(conf_mode, mux, runtime, nvidia_present, pending):
+    active = derive_active(mux, runtime, nvidia_present)
     # supergfxd itself downgrades AsusMuxDgpu to Hybrid at boot when the MUX is in Optimus.
-    if conf_mode == "AsusMuxDgpu" and mux == 1:
+    # A pending switch is a fresh write whose MUX change may not read back yet, not a stale config.
+    if conf_mode == "AsusMuxDgpu" and mux == 1 and not pending:
         configured = "standard"
     else:
         configured = _BY_CONF.get(conf_mode, "unknown")
@@ -166,16 +178,20 @@ def state(root, runtime, repo_file):
     except ConfError as exc:
         conf_mode, error = None, str(exc)
     mux = read_mux(root)
-    pending = mux_pending(root)
-    derived = derive_state(conf_mode, mux, runtime, nvidia_card(root) is not None, pending)
+    marker = pending_marker(root)
+    derived = derive_state(conf_mode, mux, runtime, nvidia_card(root) is not None,
+                           marker is not None)
+    configured = derived["configured"]
     return {
         "version": 1,
         **derived,
+        "pendingMode": configured if marker is not None and configured in MODES else None,
         "mux": mux,
-        "muxPendingReboot": pending,
+        "muxPendingReboot": mux_pending(root),
         "dgpuDisabled": dgpu_disabled(root),
         "externalConnected": external_connected(root),
         "stockHookPresent": root.p(STOCK_HOOK_PATH).exists(),
+        "ownHookPresent": root.p(HOOK_PATH).exists(),
         "helper": helper_status(repo_file, root.p(str(INSTALLED_HELPER))),
         "error": error,
     }
@@ -339,7 +355,7 @@ def _remove(path):
         pass
 
 
-def apply_mode(root, mode, reload=lambda: None, owner_uid=0):
+def apply_mode(root, mode, reload=lambda: None, owner_uid=0, runtime=runtime_mode):
     if mode not in MODES:
         raise ApplyError(f"unknown mode {mode!r}")
     try:
@@ -352,21 +368,32 @@ def apply_mode(root, mode, reload=lambda: None, owner_uid=0):
     if mode == "ultimate" and dgpu_disabled(root) is True:
         raise ApplyError("the dGPU is disabled; the kernel refuses MUX = dGPU")
 
+    # The marker keeps the mode this boot started in, so a second switch before
+    # the reboot still compares against it; /run is cleared by the reboot.
+    boot_mode = pending_marker(root) or derive_active(
+        read_mux(root), runtime(), nvidia_card(root) is not None)
+
     conf_file = root.p(CONF_PATH)
     hook_file = root.p(HOOK_PATH)
     dropin_file = root.p(DROPIN_PATH)
     stock_file = root.p(STOCK_HOOK_PATH)
+    marker_file = root.p(PENDING_MARKER)
     want_mux = 0 if mode == "ultimate" else 1
     new_conf = json.dumps(target_config(conf, mode), indent=2).encode() + b"\n"
     try:
         saved_mux = mux_file.read_bytes()
-        saved_files = {p: _snapshot_file(p) for p in (conf_file, hook_file, dropin_file, stock_file)}
+        saved_files = {p: _snapshot_file(p)
+                       for p in (conf_file, hook_file, dropin_file, stock_file, marker_file)}
     except OSError as exc:
         raise ApplyError(f"cannot snapshot state: {exc}") from exc
 
     # current_value may not reflect a write before the reboot, so pending_reboot also forces the write.
     mux_written = False
     try:
+        if mode == boot_mode:
+            _remove(marker_file)
+        else:
+            _install(marker_file, f"{boot_mode}\n".encode(), 0o644, owner_uid)
         if read_mux(root) != want_mux or mux_pending(root):
             mux_written = True
             _write_mux(mux_file, str(want_mux))
@@ -423,8 +450,9 @@ def normalize(root):
 def _fallback_state(error):
     return {
         "version": 1, "active": "standard", "configured": "unknown", "inconsistent": False,
-        "mux": None, "muxPendingReboot": False, "dgpuDisabled": None,
-        "externalConnected": [], "stockHookPresent": False, "helper": "missing",
+        "pendingMode": None, "mux": None, "muxPendingReboot": False, "dgpuDisabled": None,
+        "externalConnected": [], "stockHookPresent": False, "ownHookPresent": False,
+        "helper": "missing",
         "error": error,
     }
 

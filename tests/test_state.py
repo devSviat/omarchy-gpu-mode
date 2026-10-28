@@ -24,10 +24,48 @@ def test_derive_active():
     d = gm.derive_state
     assert d("Hybrid", 1, "Hybrid", True, False)["active"] == "standard"
     assert d("Integrated", 1, "Integrated", False, False)["active"] == "eco"
-    for runtime in ("Hybrid", "Integrated", None):
+    assert d("Hybrid", 0, "Hybrid", True, False)["active"] == "standard"
+    assert d("Hybrid", 0, "Integrated", True, False)["active"] == "eco"
+    for runtime in (None, "Vfio"):
         assert d("Hybrid", 0, runtime, True, False)["active"] == "ultimate"
-    assert d("Hybrid", 1, None, False, False)["active"] == "eco"
-    assert d("Hybrid", 1, None, True, False)["active"] == "standard"
+        assert d("Hybrid", 1, runtime, False, False)["active"] == "eco"
+        assert d("Hybrid", 1, runtime, True, False)["active"] == "standard"
+
+
+def test_runtime_wins_over_written_mux():
+    got = gm.derive_state("Hybrid", 1, "AsusMuxDgpu", True, True)
+    assert got["active"] == "ultimate" and got["inconsistent"] is True, got
+
+
+def test_pending_ultimate_is_not_treated_as_stale():
+    got = gm.derive_state("AsusMuxDgpu", 1, "Hybrid", True, True)
+    assert got == {"active": "standard", "configured": "ultimate", "inconsistent": True}, got
+
+
+def test_marker_drives_inconsistent_not_pending_reboot():
+    base = fakeroot.build(conf_mode="Hybrid", mux="1", pending="1")
+    root = gm.Root(base)
+    got = gm.state(root, "Hybrid", Path("/x"))
+    assert got["inconsistent"] is False and got["muxPendingReboot"] is True, got
+    assert got["pendingMode"] is None
+    fakeroot.write(base, gm.PENDING_MARKER.lstrip("/"), "standard\n")
+    assert gm.state(root, "Hybrid", Path("/x"))["inconsistent"] is True
+    fakeroot.write(base, "etc/supergfxd.conf", '{"mode": "AsusMuxDgpu"}')
+    got = gm.state(root, "Hybrid", Path("/x"))
+    assert got["pendingMode"] == "ultimate" and got["active"] == "standard", got
+    fakeroot.write(base, gm.PENDING_MARKER.lstrip("/"), "bogus\n")
+    got = gm.state(root, "Hybrid", Path("/x"))
+    assert got["pendingMode"] is None and got["configured"] == "standard", got
+
+
+def test_hook_presence():
+    base = fakeroot.build()
+    got = gm.state(gm.Root(base), "Hybrid", Path("/x"))
+    assert got["ownHookPresent"] is False and got["stockHookPresent"] is False
+    fakeroot.write(base, gm.HOOK_PATH.lstrip("/"), "x")
+    fakeroot.write(base, gm.STOCK_HOOK_PATH.lstrip("/"), "x")
+    got = gm.state(gm.Root(base), "Hybrid", Path("/x"))
+    assert got["ownHookPresent"] is True and got["stockHookPresent"] is True
 
 
 def test_stale_conf_is_consistent():
@@ -156,8 +194,9 @@ def test_main_state_survives_internal_failure():
     assert code == 0 and set(got) == CONTRACT_KEYS and got["error"], got
 
 
-CONTRACT_KEYS = {"version", "active", "configured", "inconsistent", "mux", "muxPendingReboot",
-                 "dgpuDisabled", "externalConnected", "stockHookPresent", "helper", "error"}
+CONTRACT_KEYS = {"version", "active", "configured", "inconsistent", "pendingMode", "mux",
+                 "muxPendingReboot", "dgpuDisabled", "externalConnected", "stockHookPresent",
+                 "ownHookPresent", "helper", "error"}
 
 
 if __name__ == "__main__":

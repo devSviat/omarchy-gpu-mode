@@ -45,6 +45,7 @@ def eco_files(base):
 
 def apply(base, mode, **kwargs):
     kwargs.setdefault("owner_uid", os.getuid())
+    kwargs.setdefault("runtime", lambda: None)
     gm.apply_mode(gm.Root(base), mode, **kwargs)
 
 
@@ -342,6 +343,57 @@ def test_normalize_refused_under_pkexec():
         assert gm.main(["normalize"]) == 2
     finally:
         del os.environ["PKEXEC_UID"]
+
+
+def marker(base):
+    return Path(base, gm.PENDING_MARKER.lstrip("/"))
+
+
+def fail_conf_write_once(fn):
+    original = gm._atomic_write
+    state = {"failed": False}
+
+    def failing(path, data, mode):
+        if str(path).endswith("supergfxd.conf") and not state["failed"]:
+            state["failed"] = True
+            raise OSError("disk full")
+        return original(path, data, mode)
+
+    gm._atomic_write = failing
+    try:
+        assert raises_apply(fn)
+    finally:
+        gm._atomic_write = original
+    assert state["failed"]
+
+
+def test_marker_records_boot_mode_and_clears():
+    base = fakeroot.build(conf_mode="Hybrid", mux="1")
+    apply(base, "ultimate", runtime=lambda: "Hybrid")
+    assert marker(base).read_text() == "standard\n"
+    assert marker(base).stat().st_mode & 0o777 == 0o644
+    assert marker(base).parent.stat().st_mode & 0o777 == 0o755
+    apply(base, "eco", runtime=lambda: "AsusMuxDgpu")
+    assert marker(base).read_text() == "standard\n"
+    apply(base, "standard", runtime=lambda: "AsusMuxDgpu")
+    assert not marker(base).exists()
+
+
+def test_marker_falls_back_to_runtime():
+    base = fakeroot.build(conf_mode="Hybrid", mux="1")
+    marker(base).parent.mkdir(parents=True)
+    marker(base).write_text("garbage\n")
+    apply(base, "eco", runtime=lambda: "AsusMuxDgpu")
+    assert marker(base).read_text() == "ultimate\n"
+
+
+def test_marker_rolled_back():
+    base = fakeroot.build(conf_mode="Hybrid", mux="1")
+    fail_conf_write_once(lambda: apply(base, "eco", runtime=lambda: "Hybrid"))
+    assert not marker(base).exists()
+    put(base, gm.PENDING_MARKER, "standard\n", 0o644)
+    fail_conf_write_once(lambda: apply(base, "standard", runtime=lambda: "AsusMuxDgpu"))
+    assert marker(base).read_text() == "standard\n"
 
 
 def test_normalize():

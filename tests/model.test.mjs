@@ -9,8 +9,9 @@ const INSTALL = "sudo " + REPO + "/install-root.sh"
 function state(over) {
   return Object.assign({
     version: 1, active: "standard", configured: "standard", inconsistent: false,
-    mux: 1, muxPendingReboot: false, dgpuDisabled: false, externalConnected: [],
-    stockHookPresent: false, helper: "current", error: ""
+    pendingMode: null, mux: 1, muxPendingReboot: false, dgpuDisabled: false,
+    externalConnected: [], stockHookPresent: false, ownHookPresent: false,
+    helper: "current", error: ""
   }, over || {})
 }
 
