@@ -16,11 +16,17 @@ Switching Ultimate to Eco also takes one reboot.
 
 ### How Eco works
 
-Eco powers the dGPU off in firmware, as G-Helper does. The plugin sets `"hotplug_type": "Asus"` in `/etc/supergfxd.conf`. With it, `supergfxd` sets `dgpu_disable=1` when it boots in `Integrated`, and its wake handler sets it again after each resume. The firmware is then expected to keep the GPU off the PCI bus across suspend; this is not yet verified on hardware. Leaving Eco, the helper writes `dgpu_disable=0` before the MUX: the kernel refuses MUX = dGPU while the dGPU is disabled, and `supergfxd` would otherwise boot back into `Integrated`.
+Eco powers the dGPU off in firmware, as G-Helper does. The plugin sets `"hotplug_type": "Asus"` in `/etc/supergfxd.conf`. With it, `supergfxd` sets `dgpu_disable=1` when it boots in `Integrated`, and its wake handler sets it again after each resume. The firmware then keeps the GPU off the PCI bus across suspend (verified on the hardware listed below). Leaving Eco, the helper writes `dgpu_disable=0` before the MUX: the kernel refuses MUX = dGPU while the dGPU is disabled, and `supergfxd` would otherwise boot back into `Integrated`.
 
 The helper never writes `dgpu_disable=1` while any NVIDIA PCI function is present. If you revert to Eco before the reboot and the GPU is still absent, it writes 1 back; otherwise the window keeps asking for a reboot. Reboot right after a switch, before suspending: on resume `supergfxd` re-disables the dGPU while it still runs Eco. If a switch still lands in Eco, the window says so; apply the mode again.
 
 Earlier versions used a sleep hook that switched to Vfio and back to Integrated after resume. On resume the firmware brings the GPU back and the desktop opens it within seconds, so the hook could not power it off safely. The hook is gone; the helper and the root install remove its old file.
+
+## Tested on
+
+- ASUS ROG Zephyrus G16 GU603ZV (Intel iGPU + RTX 4060 Laptop), Omarchy 4.0.6, kernel 7.2.8, supergfxctl 5.2.7, nvidia-open 615.78. All six transitions, each with one reboot, and suspend in Eco: see [docs/notes/2026-10-28-hardware-test.md](docs/notes/2026-10-28-hardware-test.md).
+
+Other ASUS models with a MUX should behave the same through `supergfxd`, but are untested. The plugin changes firmware GPU settings; read the recovery section before the first switch.
 
 ## Requirements
 

@@ -1,6 +1,6 @@
 # GPU Mode for Omarchy — Design
 
-Date: 2026-10-28 · Author: devSviat · Status: approved 2026-10-28 · local only, not published
+Date: 2026-10-28 · Author: devSviat · Status: approved 2026-10-28 · hardware-tested and published 2026-10-28
 
 ## Why
 
@@ -180,7 +180,7 @@ Omarchy menu row ──summon──▶ Panel.qml (window, variant B)
 
 ## Installation
 
-- **Local only until it is tested on the hardware.** No GitHub remote, no push, no catalog submission. Publishing is a separate later decision.
+- The repository stayed local until the hardware test passed (docs/notes/2026-10-28-hardware-test.md), then was published.
 - Author's call, so that publishing later costs nothing: UI strings, code comments and the README are in English, and nothing personal is hard-coded. Machine facts (the NVIDIA card, MUX path, eDP name) are detected at runtime, not written as constants.
 
 - Plugin files: `~/.config/omarchy/plugins/sviat.gpu-mode`, as a link to `~/Projects/omarchy-gpu-mode`, the same setup as nightlight.
