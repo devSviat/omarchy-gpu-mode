@@ -1,0 +1,237 @@
+"""Tests for the `apply` and `normalize` commands.
+
+Run with:  python3 -I tests/test_apply.py
+"""
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import fakeroot  # noqa: E402
+
+gm = fakeroot.load_module()
+
+
+def snap(base, *paths):
+    out = {}
+    for rel in paths:
+        p = Path(base) / rel.lstrip("/")
+        out[rel] = (p.read_bytes(), p.stat().st_mode & 0o777) if p.is_file() else None
+    return out
+
+
+def mux_file(base):
+    return Path(base) / fakeroot.ARMOURY / "gpu_mux_mode/current_value"
+
+
+def conf_file(base):
+    return Path(base) / "etc/supergfxd.conf"
+
+
+def put(base, rel, text, mode):
+    p = fakeroot.write(base, rel.lstrip("/"), text)
+    p.chmod(mode)
+    return p
+
+
+def eco_files(base):
+    return {rel: Path(base, rel.lstrip("/")) for rel in
+            (gm.HOOK_PATH, gm.DROPIN_PATH)}
+
+
+def run_apply(base, mode):
+    calls = []
+    gm.apply_mode(gm.Root(base), mode, reload=lambda: calls.append(1))
+    return calls
+
+
+def raises_apply(fn):
+    try:
+        fn()
+    except gm.ApplyError:
+        return True
+    return False
+
+
+def test_target_config():
+    conf = {"mode": "Hybrid", "hotplug_type": "None", "x": [1]}
+    assert gm.target_config(conf, "standard") == {"mode": "Hybrid", "hotplug_type": "None", "x": [1]}
+    eco = gm.target_config(conf, "eco")
+    assert eco == {"mode": "Integrated", "vfio_enable": True, "hotplug_type": "None", "x": [1]}
+    assert conf["mode"] == "Hybrid" and "vfio_enable" not in conf
+    assert gm.target_config(conf, "ultimate")["mode"] == "AsusMuxDgpu"
+
+
+def test_standard_to_eco():
+    base = fakeroot.build(conf_mode="Hybrid", mux="1")
+    conf_file(base).write_text(json.dumps({"mode": "Hybrid", "hotplug_type": "None", "keep": 7}))
+    put(base, gm.STOCK_HOOK_PATH, "#!/bin/bash\n", 0o755)
+    calls = run_apply(base, "eco")
+    got = json.loads(conf_file(base).read_text())
+    assert got == {"mode": "Integrated", "vfio_enable": True, "hotplug_type": "None", "keep": 7}
+    assert mux_file(base).read_text() == "1\n"
+    hook, dropin = Path(base, gm.HOOK_PATH.lstrip("/")), Path(base, gm.DROPIN_PATH.lstrip("/"))
+    assert hook.read_text() == gm.HOOK_SOURCE and hook.stat().st_mode & 0o777 == 0o755
+    assert dropin.read_text() == gm.DROPIN_SOURCE and dropin.stat().st_mode & 0o777 == 0o644
+    assert conf_file(base).stat().st_mode & 0o777 == 0o644
+    assert not Path(base, gm.STOCK_HOOK_PATH.lstrip("/")).exists()
+    assert calls == [1]
+
+
+def test_eco_to_ultimate():
+    base = fakeroot.build(conf_mode="Integrated", mux="1")
+    run_apply(base, "eco")
+    fakeroot.write(base, fakeroot.ARMOURY + "/gpu_mux_mode/current_value", "1\n")
+    calls = run_apply(base, "ultimate")
+    assert json.loads(conf_file(base).read_text())["mode"] == "AsusMuxDgpu"
+    assert mux_file(base).read_text() == "0"
+    for p in eco_files(base).values():
+        assert not p.exists()
+    assert calls == [1]
+
+
+def test_ultimate_to_eco_single_step():
+    base = fakeroot.build(conf_mode="AsusMuxDgpu", mux="0")
+    run_apply(base, "eco")
+    assert mux_file(base).read_text() == "1"
+    assert json.loads(conf_file(base).read_text())["mode"] == "Integrated"
+    for p in eco_files(base).values():
+        assert p.is_file()
+
+
+def test_ultimate_refused_when_dgpu_disabled():
+    base = fakeroot.build(conf_mode="Hybrid", mux="1", dgpu_disable="1")
+    before = snap(base, "etc/supergfxd.conf", fakeroot.ARMOURY + "/gpu_mux_mode/current_value")
+    assert raises_apply(lambda: run_apply(base, "ultimate"))
+    after = snap(base, "etc/supergfxd.conf", fakeroot.ARMOURY + "/gpu_mux_mode/current_value")
+    assert before == after
+
+
+def test_apply_refuses_bad_conf_without_side_effects():
+    for kwargs in ({"conf_text": "{not json"}, {"conf_text": "[]"}):
+        base = fakeroot.build(mux="0", **kwargs)
+        put(base, gm.HOOK_PATH, "old hook", 0o755)
+        paths = ("etc/supergfxd.conf", fakeroot.ARMOURY + "/gpu_mux_mode/current_value",
+                 gm.HOOK_PATH, gm.DROPIN_PATH)
+        before = snap(base, *paths)
+        assert raises_apply(lambda: run_apply(base, "standard"))
+        assert snap(base, *paths) == before
+    base = fakeroot.build(mux="0")
+    conf_file(base).unlink()
+    before = snap(base, fakeroot.ARMOURY + "/gpu_mux_mode/current_value")
+    assert raises_apply(lambda: run_apply(base, "eco"))
+    assert snap(base, fakeroot.ARMOURY + "/gpu_mux_mode/current_value") == before
+    assert not Path(base, gm.HOOK_PATH.lstrip("/")).exists()
+
+
+def test_apply_rejects_unknown_mode():
+    base = fakeroot.build()
+    assert raises_apply(lambda: run_apply(base, "turbo"))
+
+
+def test_rollback_on_failure():
+    base = fakeroot.build(conf_mode="AsusMuxDgpu", mux="0")
+    put(base, gm.STOCK_HOOK_PATH, "stock", 0o755)
+    put(base, gm.DROPIN_PATH, "old dropin", 0o644)
+    paths = ("etc/supergfxd.conf", fakeroot.ARMOURY + "/gpu_mux_mode/current_value",
+             gm.HOOK_PATH, gm.DROPIN_PATH, gm.STOCK_HOOK_PATH)
+    before = snap(base, *paths)
+    original = gm._atomic_write
+    state = {"failed": False}
+
+    def failing(path, data, mode):
+        if str(path).endswith("supergfxd.conf") and not state["failed"]:
+            state["failed"] = True
+            raise OSError("disk full")
+        return original(path, data, mode)
+
+    gm._atomic_write = failing
+    reloads = []
+    try:
+        assert raises_apply(lambda: gm.apply_mode(gm.Root(base), "eco",
+                                                  reload=lambda: reloads.append(1)))
+    finally:
+        gm._atomic_write = original
+    assert state["failed"]
+    assert snap(base, *paths) == before
+    assert reloads == [1]
+
+
+def test_idempotent():
+    base = fakeroot.build(conf_mode="Hybrid", mux="1")
+    run_apply(base, "eco")
+    paths = ("etc/supergfxd.conf", fakeroot.ARMOURY + "/gpu_mux_mode/current_value",
+             gm.HOOK_PATH, gm.DROPIN_PATH)
+    first = snap(base, *paths)
+    calls = run_apply(base, "eco")
+    assert snap(base, *paths) == first
+    assert calls == []
+
+
+def test_main_rejects_args():
+    assert gm.main(["apply", "turbo"]) == 2
+    assert gm.main(["apply"]) == 2
+    assert gm.main(["rm", "-rf"]) == 2
+    assert gm.main(["apply", "eco", "extra"]) == 2
+    assert gm.main(["normalize", "x"]) == 2
+
+
+def test_main_requires_root():
+    if os.geteuid() == 0:
+        return
+    assert gm.main(["apply", "eco"]) == 1
+    assert gm.main(["normalize"]) == 1
+
+
+def test_normalize():
+    base = fakeroot.build(conf_mode="AsusMuxDgpu", mux="1")
+    assert gm.normalize(gm.Root(base)) is True
+    assert json.loads(conf_file(base).read_text())["mode"] == "Hybrid"
+    for conf_mode, mux in (("AsusMuxDgpu", "0"), ("Hybrid", "1"), ("Integrated", "1")):
+        base = fakeroot.build(conf_mode=conf_mode, mux=mux)
+        before = conf_file(base).read_bytes()
+        assert gm.normalize(gm.Root(base)) is False
+        assert conf_file(base).read_bytes() == before
+
+
+def test_normalize_removes_stock_hook_when_ours_present():
+    base = fakeroot.build(conf_mode="Integrated", mux="1")
+    put(base, gm.HOOK_PATH, gm.HOOK_SOURCE, 0o755)
+    put(base, gm.STOCK_HOOK_PATH, "stock", 0o755)
+    gm.normalize(gm.Root(base))
+    assert not Path(base, gm.STOCK_HOOK_PATH.lstrip("/")).exists()
+    assert Path(base, gm.HOOK_PATH.lstrip("/")).is_file()
+
+
+def test_normalize_keeps_stock_hook_when_ours_absent():
+    base = fakeroot.build(conf_mode="Integrated", mux="1")
+    put(base, gm.STOCK_HOOK_PATH, "stock", 0o755)
+    gm.normalize(gm.Root(base))
+    assert Path(base, gm.STOCK_HOOK_PATH.lstrip("/")).read_text() == "stock"
+
+
+def test_hook_parses():
+    path = Path(fakeroot.mkdtemp("gpumode-hook-")) / "hook"
+    path.write_text(gm.HOOK_SOURCE)
+    done = subprocess.run(["/usr/bin/bash", "-n", str(path)], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    assert gm.HOOK_SOURCE.startswith("#!/bin/bash\n")
+    assert "/run/omarchy-gpu-mode-igpu" in gm.HOOK_SOURCE
+    assert "force-igpu, MIT" in gm.HOOK_SOURCE
+
+
+def test_dropin_matches_stock():
+    stock = Path("/usr/share/omarchy/default/systemd/system/supergfxd.service.d/delay-start.conf")
+    if stock.is_file():
+        assert gm.DROPIN_SOURCE == stock.read_text()
+
+
+if __name__ == "__main__":
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
+    print("ok")

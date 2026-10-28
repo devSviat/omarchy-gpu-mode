@@ -1,7 +1,10 @@
 #!/usr/bin/python3 -I
 import json
+import os
+import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 MODES = {"eco": "Integrated", "standard": "Hybrid", "ultimate": "AsusMuxDgpu"}
@@ -15,6 +18,9 @@ DRM_CLASS = "/sys/class/drm"
 SUPERGFXCTL = "/usr/bin/supergfxctl"
 INSTALLED_HELPER = Path("/usr/local/libexec/omarchy-gpu-mode/gpu-mode")
 STOCK_HOOK = "/usr/lib/systemd/system-sleep/force-igpu"
+STOCK_HOOK_PATH = STOCK_HOOK
+HOOK_PATH = "/usr/lib/systemd/system-sleep/omarchy-gpu-mode-igpu"
+DROPIN_PATH = "/etc/systemd/system/supergfxd.service.d/delay-start.conf"
 NVIDIA_VENDOR = "0x10de"
 
 
@@ -175,6 +181,231 @@ def state(root, runtime, repo_file):
         "error": error,
     }
 
+HOOK_SOURCE = r"""#!/bin/bash
+# Adapted from Omarchy's default/systemd/system-sleep/force-igpu, MIT.
+
+set -e
+
+# Integrated mode wakes up in Hybrid after suspend on some ASUS laptops; the Vfio to
+# Integrated switch powers the dGPU off again without a restart.
+
+restore_marker=/run/omarchy-gpu-mode-igpu
+sleep_action=${SYSTEMD_SLEEP_ACTION:-$2}
+[[ -x /usr/bin/supergfxctl ]] || exit 0
+
+switch_mode() {
+  local expected="$1" current
+
+  if ! /usr/bin/timeout --kill-after=1s 3s /usr/bin/supergfxctl -m "$expected"; then
+    echo "Could not request the GPU transition to $expected mode" >&2
+    return 1
+  fi
+  for _ in {1..10}; do
+    if current=$(/usr/bin/timeout --kill-after=1s 2s /usr/bin/supergfxctl -g 2>/dev/null) &&
+      [[ $current == "$expected" ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "Could not confirm the GPU transition to $expected mode" >&2
+  return 1
+}
+
+case "$1" in
+  pre)
+    # The marker records the mode this sleep cycle started in: the temporary hibernate
+    # switch to Vfio is persisted by supergfxctl, so post must not consult the live mode.
+    if [[ -L $restore_marker ]]; then
+      exit 1
+    elif [[ ! -f $restore_marker ]]; then
+      active=$(/usr/bin/timeout --kill-after=1s 3s /usr/bin/supergfxctl -g 2>/dev/null) || exit 0
+      [[ $active == "Integrated" ]] || exit 0
+      /usr/bin/grep -Eq '"mode"[[:space:]]*:[[:space:]]*"Integrated"' /etc/supergfxd.conf 2>/dev/null || exit 0
+      /usr/bin/install -m 0600 -o root -g root -T /dev/null "$restore_marker"
+    fi
+
+    # Without detaching the nvidia driver first, hibernate resume fails: the driver
+    # cannot freeze a powered-off dGPU (-EIO), which aborts the entire resume.
+    if [[ $sleep_action == "hibernate" ]]; then
+      switch_mode Vfio
+    fi
+    ;;
+  post)
+    [[ -f $restore_marker && ! -L $restore_marker ]] || exit 0
+
+    # Let the device finish re-enumerating.
+    sleep 4
+
+    switch_mode Vfio
+    switch_mode Integrated
+    /usr/bin/rm -f -- "$restore_marker"
+    ;;
+esac
+"""
+
+DROPIN_SOURCE = """[Service]
+# Delay startup to avoid race condition with display manager initialization
+# when booting in Integrated mode. Without this delay, the system can freeze
+# on boot because supergfxd tries to disable the dGPU while the display
+# subsystem is still initializing.
+ExecStartPre=/bin/sleep 5
+"""
+
+
+class ApplyError(Exception):
+    pass
+
+
+def target_config(conf, mode):
+    result = dict(conf)
+    result["mode"] = MODES[mode]
+    if mode == "eco":
+        result["vfio_enable"] = True
+    return result
+
+
+def _atomic_write(path, data, mode):
+    path = Path(path)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            os.fchmod(handle.fileno(), mode)
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _snapshot_file(path):
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(info.st_mode):
+        return ("link", os.readlink(path))
+    if stat.S_ISREG(info.st_mode):
+        return ("file", Path(path).read_bytes(), stat.S_IMODE(info.st_mode))
+    raise ApplyError(f"{path} is not a regular file")
+
+
+def _restore_file(path, saved):
+    if saved is None:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+    elif saved[0] == "link":
+        tmp = f"{path}.restore-{os.getpid()}"
+        os.symlink(saved[1], tmp)
+        os.replace(tmp, path)
+    else:
+        _atomic_write(path, saved[1], saved[2])
+
+
+def _write_mux(path, value):
+    with open(path, "w") as handle:
+        handle.write(value)
+
+
+def _install(path, data, mode):
+    path = Path(path)
+    saved = _snapshot_file(path)
+    if saved == ("file", data, mode):
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(path, data, mode)
+
+
+def _remove(path):
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+
+def apply_mode(root, mode, reload=lambda: None):
+    if mode not in MODES:
+        raise ApplyError(f"unknown mode {mode!r}")
+    try:
+        conf = read_conf(root)
+    except ConfError as exc:
+        raise ApplyError(str(exc)) from exc
+    mux_file = mux_path(root)
+    if mux_file is None:
+        raise ApplyError("MUX attribute not found")
+    if mode == "ultimate" and dgpu_disabled(root) is True:
+        raise ApplyError("the dGPU is disabled; the kernel refuses MUX = dGPU")
+
+    conf_file = root.p(CONF_PATH)
+    hook_file = root.p(HOOK_PATH)
+    dropin_file = root.p(DROPIN_PATH)
+    stock_file = root.p(STOCK_HOOK_PATH)
+    tracked = [hook_file, dropin_file, stock_file]
+    saved_conf = conf_file.read_bytes()
+    saved_mux = mux_file.read_bytes()
+    saved_files = {p: _snapshot_file(p) for p in tracked}
+
+    want_mux = "0" if mode == "ultimate" else "1"
+    new_conf = json.dumps(target_config(conf, mode), indent=2).encode() + b"\n"
+    try:
+        if _read(mux_file) != want_mux:
+            _write_mux(mux_file, want_mux)
+        if mode == "eco":
+            _install(hook_file, HOOK_SOURCE.encode(), 0o755)
+            _install(dropin_file, DROPIN_SOURCE.encode(), 0o644)
+            _remove(stock_file)
+        else:
+            _remove(hook_file)
+            _remove(dropin_file)
+        _atomic_write(conf_file, new_conf, 0o644)
+    except Exception as exc:
+        failure = f"apply {mode} failed: {exc}"
+        dropin_changed = _snapshot_file(dropin_file) != saved_files[dropin_file]
+        try:
+            if mux_file.read_bytes() != saved_mux:
+                _write_mux(mux_file, saved_mux.decode())
+            for path, saved in saved_files.items():
+                if _snapshot_file(path) != saved:
+                    _restore_file(path, saved)
+            if conf_file.read_bytes() != saved_conf:
+                _atomic_write(conf_file, saved_conf, 0o644)
+        except Exception as restore_exc:
+            failure += f"; rollback failed: {restore_exc}"
+        if dropin_changed:
+            try:
+                reload()
+            except Exception as reload_exc:
+                failure += f"; daemon-reload failed: {reload_exc}"
+        raise ApplyError(failure) from exc
+
+    if saved_files[dropin_file] != _snapshot_file(dropin_file):
+        reload()
+
+
+def normalize(root):
+    try:
+        conf = read_conf(root)
+    except ConfError as exc:
+        raise ApplyError(str(exc)) from exc
+    stock_file = root.p(STOCK_HOOK_PATH)
+    try:
+        if _snapshot_file(root.p(HOOK_PATH)) is not None:
+            _remove(stock_file)
+        if conf["mode"] != "AsusMuxDgpu" or read_mux(root) != 1:
+            return False
+        _atomic_write(root.p(CONF_PATH),
+                      json.dumps({**conf, "mode": "Hybrid"}, indent=2).encode() + b"\n", 0o644)
+    except OSError as exc:
+        raise ApplyError(f"normalize failed: {exc}") from exc
+    return True
+
 
 def _fallback_state(error):
     return {
@@ -193,8 +424,31 @@ def main(argv):
             result = _fallback_state(f"state failed: {exc}")
         print(json.dumps(result, separators=(",", ":")))
         return 0
-    print("usage: gpu-mode state", file=sys.stderr)
+    if argv[:1] == ["apply"] and len(argv) == 2 and argv[1] in MODES:
+        return _run_root(lambda: apply_mode(Root("/"), argv[1], reload=_daemon_reload))
+    if argv == ["normalize"]:
+        return _run_root(lambda: normalize(Root("/")))
+    print("usage: gpu-mode state | apply <eco|standard|ultimate> | normalize", file=sys.stderr)
     return 2
+
+
+def _daemon_reload():
+    try:
+        subprocess.run(["/usr/bin/systemctl", "daemon-reload"], check=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ApplyError(f"systemctl daemon-reload failed: {exc}") from exc
+
+
+def _run_root(action):
+    if os.geteuid() != 0:
+        print("gpu-mode: must run as root", file=sys.stderr)
+        return 1
+    try:
+        action()
+    except ApplyError as exc:
+        print(f"gpu-mode: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
