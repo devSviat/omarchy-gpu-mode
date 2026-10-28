@@ -170,8 +170,8 @@ Omarchy menu row ──summon──▶ Panel.qml (window, variant B)
 
 ### Menu integration
 - Plugins cannot add menu rows, so `bin/` ships an installer/remover for `~/.config/omarchy/extensions/omarchy-menu.jsonc`, following `ReidenXerx/omarchy-dgpu-status`'s `dgpu-status-menu-install`.
-- The stock gate `when: omarchy-hw-hybrid-gpu` (checks that `supergfxctl -s` lists Hybrid) is kept. In 5.2.7 `get_supported_modes` always starts with `[Integrated, Hybrid]`; it returns `[Integrated]` only when the dGPU vendor is unknown **and** `dgpu_disable` is absent, and `dgpu_disable` exists here. So the row stays visible in Eco and Ultimate. Confirm on the hardware.
-- It writes a marked block that redefines `trigger.hardware.hybrid-gpu` in full: icon, label "GPU Mode", `when: omarchy-hw-hybrid-gpu`, and an action that summons the panel.
+- The stock gate `when: omarchy-hw-hybrid-gpu` (it greps `supergfxctl -s` for Hybrid) is NOT reused: on the hardware (2026-10-28) supergfxd booted in Ultimate lists only `[AsusMuxDgpu]`, which hid the row. The row's own gate: `/usr/bin/supergfxctl` is executable and a MUX attribute exists (asus-armoury or asus-nb-wmi `gpu_mux_mode`).
+- It writes a marked block that redefines `trigger.hardware.hybrid-gpu` in full: icon, label "GPU Mode", the gate above as `when`, and an action that summons the panel.
 - It preserves the rest of the file, comments included, and backs up before writing. Remove restores the stock row.
 
 ### Optional bar widget

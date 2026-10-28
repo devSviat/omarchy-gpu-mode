@@ -58,7 +58,10 @@ def test_install_into_template():
         assert list(data) == ["trigger.hardware.hybrid-gpu"], data
         row = data["trigger.hardware.hybrid-gpu"]
         assert row["label"] == "GPU Mode"
-        assert row["when"] == "omarchy-hw-hybrid-gpu"
+        assert "omarchy-hw-hybrid-gpu" not in row["when"]
+        assert "/usr/bin/supergfxctl" in row["when"] and "gpu_mux_mode" in row["when"]
+        gate = subprocess.run(["/bin/bash", "-c", row["when"]])
+        assert gate.returncode in (0, 1), gate
         assert row["action"] == "omarchy-shell shell summon sviat.gpu-mode '{}'"
         assert row["icon"]
 

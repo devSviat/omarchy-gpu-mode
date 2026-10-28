@@ -19,9 +19,16 @@ from pathlib import Path
 DEFAULT_FILE = Path.home() / ".config/omarchy/extensions/omarchy-menu.jsonc"
 BEGIN = "  // >>> sviat.gpu-mode"
 END = "  // <<< sviat.gpu-mode"
+# Omarchy's omarchy-hw-hybrid-gpu gate greps `supergfxctl -s` for Hybrid, but supergfxd
+# booted in Ultimate lists only AsusMuxDgpu, which hid the row there.
+GATE = (
+    "[ -x /usr/bin/supergfxctl ] && "
+    "{ [ -e /sys/class/firmware-attributes/asus-armoury/attributes/gpu_mux_mode ] || "
+    "[ -e /sys/devices/platform/asus-nb-wmi/gpu_mux_mode ]; }"
+)
 ROW = (
     '  "trigger.hardware.hybrid-gpu": {"icon":"","label":"GPU Mode",'
-    '"when":"omarchy-hw-hybrid-gpu",'
+    f'"when":"{GATE}",'
     '"action":"omarchy-shell shell summon sviat.gpu-mode \'{}\'"},'
 )
 BLOCK = [BEGIN, ROW, END]
