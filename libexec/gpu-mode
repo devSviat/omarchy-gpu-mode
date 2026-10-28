@@ -1,0 +1,530 @@
+#!/usr/bin/python3 -I
+import json
+import os
+import stat
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+MODES = {"eco": "Integrated", "standard": "Hybrid", "ultimate": "AsusMuxDgpu"}
+_BY_CONF = {conf: name for name, conf in MODES.items()}
+
+CONF_PATH = "/etc/supergfxd.conf"
+ARMOURY = "/sys/class/firmware-attributes/asus-armoury/attributes"
+WMI_MUX = "/sys/devices/platform/asus-nb-wmi/gpu_mux_mode"
+WMI_DGPU = "/sys/devices/platform/asus-nb-wmi/dgpu_disable"
+PCI_DEVICES = "/sys/bus/pci/devices"
+DRM_CLASS = "/sys/class/drm"
+SUPERGFXCTL = "/usr/bin/supergfxctl"
+INSTALLED_HELPER = Path("/usr/local/libexec/omarchy-gpu-mode/gpu-mode")
+STOCK_HOOK_PATH = "/usr/lib/systemd/system-sleep/force-igpu"
+HOOK_PATH = "/usr/lib/systemd/system-sleep/omarchy-gpu-mode-igpu"
+DROPIN_PATH = "/etc/systemd/system/supergfxd.service.d/delay-start.conf"
+PENDING_MARKER = "/run/omarchy-gpu-mode/pending"
+DGPU_CLEARED = "/run/omarchy-gpu-mode/dgpu-cleared"
+NVIDIA_VENDOR = "0x10de"
+
+
+class ConfError(Exception):
+    pass
+
+
+class Root:
+    def __init__(self, base="/"):
+        self.base = Path(base)
+
+    def p(self, abs_path):
+        return self.base / abs_path.lstrip("/")
+
+
+def _read(path):
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return None
+
+
+def read_conf(root):
+    path = root.p(CONF_PATH)
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError, RecursionError) as exc:
+        raise ConfError(f"cannot read {CONF_PATH}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfError(f"{CONF_PATH} is not a JSON object")
+    if not isinstance(data.get("mode"), str):
+        raise ConfError(f"{CONF_PATH} has no string 'mode'")
+    return data
+
+
+def _attr_path(root, armoury_name, wmi_path):
+    for candidate in (f"{ARMOURY}/{armoury_name}/current_value", wmi_path):
+        path = root.p(candidate)
+        if path.is_file():
+            return path
+    return None
+
+
+def mux_path(root):
+    return _attr_path(root, "gpu_mux_mode", WMI_MUX)
+
+
+def dgpu_path(root):
+    return _attr_path(root, "dgpu_disable", WMI_DGPU)
+
+
+def read_mux(root):
+    path = mux_path(root)
+    value = _read(path) if path else None
+    return int(value) if value in ("0", "1") else None
+
+
+def mux_pending(root):
+    return _read(root.p(f"{ARMOURY}/pending_reboot")) == "1"
+
+
+def dgpu_disabled(root):
+    path = dgpu_path(root)
+    value = _read(path) if path else None
+    return {"0": False, "1": True}.get(value)
+
+
+def nvidia_function_present(root):
+    devices = root.p(PCI_DEVICES)
+    try:
+        entries = list(devices.iterdir())
+    except OSError:
+        return True
+    return any(_read(dev / "vendor") == NVIDIA_VENDOR for dev in entries)
+
+
+def nvidia_card(root):
+    devices = root.p(PCI_DEVICES)
+    if not devices.is_dir():
+        return None
+    try:
+        entries = sorted(devices.iterdir())
+    except OSError:
+        return None
+    for dev in entries:
+        if _read(dev / "vendor") != NVIDIA_VENDOR:
+            continue
+        if not (_read(dev / "class") or "").startswith("0x03"):
+            continue
+        try:
+            cards = sorted((dev / "drm").glob("card*"))
+        except OSError:
+            continue
+        cards = [c for c in cards if c.name[4:].isdigit()]
+        if cards:
+            return cards[0].name
+    return None
+
+
+def external_connected(root):
+    card = nvidia_card(root)
+    if card is None:
+        return []
+    found = []
+    try:
+        entries = sorted(root.p(DRM_CLASS).glob(f"{card}-*"))
+    except OSError:
+        return []
+    for entry in entries:
+        connector = entry.name[len(card) + 1:]
+        if connector.startswith("eDP"):
+            continue
+        if _read(entry / "status") == "connected":
+            found.append(connector)
+    return found
+
+
+def runtime_mode(timeout=3.0, cmd=(SUPERGFXCTL, "-g")):
+    # A wedged supergfxd blocks its clients, so the call must be bounded.
+    try:
+        done = subprocess.run(list(cmd), capture_output=True, text=True,
+                              timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    return done.stdout.strip() or None
+
+
+def derive_active(mux, runtime, nvidia_present, dgpu_off, marker):
+    # supergfxd reports the mode it booted with, while the MUX value may already
+    # show a switch that waits for a reboot; without supergfxd the marker holds that mode.
+    if runtime in _BY_CONF:
+        return _BY_CONF[runtime]
+    if marker in MODES:
+        return marker
+    if mux == 0:
+        return "ultimate"
+    if dgpu_off is True or not nvidia_present:
+        return "eco"
+    return "standard"
+
+
+def pending_marker(root):
+    value = _read(root.p(PENDING_MARKER))
+    return value if value in MODES else None
+
+
+def derive_state(conf_mode, mux, runtime, nvidia_present, dgpu_off, marker):
+    # A MUX flipped in the BIOS makes supergfxd adapt at boot without rewriting its
+    # config, so a config that disagrees with the active mode is not a pending switch.
+    return {
+        "active": derive_active(mux, runtime, nvidia_present, dgpu_off, marker),
+        "configured": _BY_CONF.get(conf_mode, "unknown"),
+        "inconsistent": marker is not None,
+    }
+
+
+def helper_status(repo_file, installed):
+    try:
+        installed_bytes = Path(installed).read_bytes()
+    except OSError:
+        return "missing"
+    try:
+        repo_bytes = Path(repo_file).read_bytes()
+    except OSError:
+        return "outdated"
+    return "current" if installed_bytes == repo_bytes else "outdated"
+
+
+def state(root, runtime, repo_file):
+    error = ""
+    try:
+        conf_mode = read_conf(root).get("mode")
+    except ConfError as exc:
+        conf_mode, error = None, str(exc)
+    mux = read_mux(root)
+    marker = pending_marker(root)
+    dgpu_off = dgpu_disabled(root)
+    derived = derive_state(conf_mode, mux, runtime, nvidia_card(root) is not None,
+                           dgpu_off, marker)
+    configured = derived["configured"]
+    return {
+        "version": 1,
+        **derived,
+        "pendingMode": configured if marker is not None and configured in MODES else None,
+        "mux": mux,
+        "muxPendingReboot": mux_pending(root),
+        "dgpuDisabled": dgpu_off,
+        "externalConnected": external_connected(root),
+        "stockHookPresent": root.p(STOCK_HOOK_PATH).exists(),
+        "helper": helper_status(repo_file, root.p(str(INSTALLED_HELPER))),
+        "error": error,
+    }
+
+
+DROPIN_SOURCE = """[Service]
+# Delay startup to avoid race condition with display manager initialization
+# when booting in Integrated mode. Without this delay, the system can freeze
+# on boot because supergfxd tries to disable the dGPU while the display
+# subsystem is still initializing.
+ExecStartPre=/bin/sleep 5
+"""
+
+
+class ApplyError(Exception):
+    pass
+
+
+def target_config(conf, mode):
+    # With "Asus", supergfxd sets dgpu_disable=1 at an Integrated boot and after each resume
+    # in Integrated. While it is 1 the boot check forces Integrated, so a Hybrid boot
+    # re-enables the dGPU only if dgpu_disable was cleared before the reboot.
+    return {**conf, "mode": MODES[mode], "hotplug_type": "Asus"}
+
+
+def _atomic_write(path, data, mode):
+    path = Path(path)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            os.fchmod(handle.fileno(), mode)
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _snapshot_file(path):
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(info.st_mode):
+        return ("link", os.readlink(path))
+    if stat.S_ISREG(info.st_mode):
+        return ("file", Path(path).read_bytes(), stat.S_IMODE(info.st_mode))
+    raise ApplyError(f"{path} is not a regular file")
+
+
+def _restore_file(path, saved):
+    if saved is None:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+    elif saved[0] == "link":
+        tmp = f"{path}.restore-{os.getpid()}"
+        os.symlink(saved[1], tmp)
+        os.replace(tmp, path)
+    else:
+        _atomic_write(path, saved[1], saved[2])
+
+
+def _write_attr(path, value):
+    with open(path, "w") as handle:
+        handle.write(value)
+
+
+class DgpuRefused(ApplyError):
+    pass
+
+
+def _write_dgpu(root, path, value):
+    # dgpu_disable=1 hot-removes the GPU, which is unsafe while a driver may be bound to it.
+    if value.strip() == "1" and nvidia_function_present(root):
+        raise DgpuRefused("refusing dgpu_disable=1 while an NVIDIA PCI function is present")
+    _write_attr(path, value)
+
+
+def _ensure_private_dir(directory, owner_uid):
+    directory = Path(directory)
+    directory.mkdir(mode=0o755, parents=True, exist_ok=True)
+    info = os.lstat(directory)
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != owner_uid
+            or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+        raise ApplyError(f"{directory} must be a directory owned by uid {owner_uid} "
+                         "and writable only by its owner")
+
+
+def _install(path, data, mode, owner_uid=0):
+    path = Path(path)
+    saved = _snapshot_file(path)
+    if saved == ("file", data, mode):
+        return
+    _ensure_private_dir(path.parent, owner_uid)
+    _atomic_write(path, data, mode)
+
+
+def _remove(path):
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+
+def apply_mode(root, mode, reload=lambda: None, owner_uid=0, runtime=runtime_mode):
+    if mode not in MODES:
+        raise ApplyError(f"unknown mode {mode!r}")
+    try:
+        conf = read_conf(root)
+    except ConfError as exc:
+        raise ApplyError(str(exc)) from exc
+    mux_file = mux_path(root)
+    if mux_file is None:
+        raise ApplyError("MUX attribute not found")
+    # The kernel refuses MUX = dGPU while dgpu_disable=1, and supergfxd forces Integrated
+    # at boot while it is set, so leaving Eco clears it first.
+    dgpu_file = dgpu_path(root)
+    clear_dgpu = mode != "eco" and dgpu_file is not None and dgpu_disabled(root) is True
+
+    # The marker keeps the mode this boot started in, so a second switch before
+    # the reboot still compares against it; /run is cleared by the reboot.
+    boot_mode = pending_marker(root) or derive_active(
+        read_mux(root), runtime(), nvidia_card(root) is not None, dgpu_disabled(root), None)
+
+    conf_file = root.p(CONF_PATH)
+    hook_file = root.p(HOOK_PATH)
+    dropin_file = root.p(DROPIN_PATH)
+    stock_file = root.p(STOCK_HOOK_PATH)
+    marker_file = root.p(PENDING_MARKER)
+    cleared_file = root.p(DGPU_CLEARED)
+    # A revert to Eco after this boot cleared dgpu_disable: left at 0, supergfxd would
+    # write 1 on the next resume, possibly under a bound driver. The record decides,
+    # not the readback, which keeps showing the boot value.
+    redisable = (mode == "eco" and boot_mode == "eco" and dgpu_file is not None
+                 and cleared_file.is_file())
+    keep_pending = redisable and nvidia_function_present(root)
+    redisable = redisable and not keep_pending
+    want_mux = 0 if mode == "ultimate" else 1
+    new_conf = json.dumps(target_config(conf, mode), indent=2).encode() + b"\n"
+    try:
+        saved_mux = mux_file.read_bytes()
+        saved_dgpu = dgpu_file.read_bytes() if clear_dgpu else None
+        saved_files = {p: _snapshot_file(p) for p in
+                       (conf_file, hook_file, dropin_file, stock_file, marker_file, cleared_file)}
+    except OSError as exc:
+        raise ApplyError(f"cannot snapshot state: {exc}") from exc
+
+    written = []
+    try:
+        if mode == boot_mode and not keep_pending:
+            _remove(marker_file)
+        else:
+            _install(marker_file, f"{boot_mode}\n".encode(), 0o644, owner_uid)
+        if clear_dgpu:
+            _install(cleared_file, b"1\n", 0o644, owner_uid)
+            _write_dgpu(root, dgpu_file, "0")
+            written.append((dgpu_file, saved_dgpu))
+        # current_value may not reflect a write before the reboot, so pending_reboot also forces the write.
+        if read_mux(root) != want_mux or mux_pending(root):
+            written.append((mux_file, saved_mux))
+            _write_attr(mux_file, str(want_mux))
+        if redisable:
+            try:
+                _write_dgpu(root, dgpu_file, "1")
+            except DgpuRefused as exc:
+                raise ApplyError("the NVIDIA GPU is present; reboot to finish leaving Eco") from exc
+            # The record proves this boot wrote 0; the readback may still show the boot value.
+            written.append((dgpu_file, b"0"))
+            _remove(cleared_file)
+        _remove(hook_file)
+        if mode == "eco":
+            _install(dropin_file, DROPIN_SOURCE.encode(), 0o644, owner_uid)
+            # The stock hook would run its Vfio switch against the firmware-disabled dGPU.
+            _remove(stock_file)
+        else:
+            _remove(dropin_file)
+        _atomic_write(conf_file, new_conf, 0o644)
+        if saved_files[dropin_file] != _snapshot_file(dropin_file):
+            reload()
+    except Exception as exc:
+        errors = [f"apply {mode} failed: {exc}"]
+        dropin_dirty = _snapshot_file(dropin_file) != saved_files[dropin_file]
+        steps = []
+        # Reverse order: the kernel takes MUX = dGPU only while dgpu_disable=0.
+        for path, saved in reversed(written):
+            if path == dgpu_file:
+                steps.append(lambda saved=saved: _restore_dgpu(root, dgpu_file, saved, errors))
+            else:
+                steps.append(lambda path=path, saved=saved: _write_attr(path, saved.decode()))
+        for path, saved in saved_files.items():
+            steps.append(lambda path=path, saved=saved: (
+                _snapshot_file(path) != saved and _restore_file(path, saved)))
+        for step in steps:
+            try:
+                step()
+            except Exception as restore_exc:
+                errors.append(f"rollback failed: {restore_exc}")
+        try:
+            if dropin_dirty:
+                reload()
+        except Exception as reload_exc:
+            errors.append(f"daemon-reload after rollback failed: {reload_exc}")
+        raise ApplyError("; ".join(errors)) from exc
+
+
+def _restore_dgpu(root, path, saved, errors):
+    if saved.strip() == b"1" and nvidia_function_present(root):
+        errors.append("the NVIDIA GPU stays enabled until the next Eco boot")
+        return
+    _write_dgpu(root, path, saved.decode())
+
+
+def normalize(root):
+    try:
+        conf = read_conf(root)
+    except ConfError as exc:
+        raise ApplyError(str(exc)) from exc
+    new_conf = {**conf, "hotplug_type": "Asus"}
+    if conf["mode"] == "AsusMuxDgpu" and read_mux(root) == 1:
+        new_conf["mode"] = "Hybrid"
+    try:
+        if new_conf != conf:
+            _atomic_write(root.p(CONF_PATH),
+                          json.dumps(new_conf, indent=2).encode() + b"\n", 0o644)
+        _remove(root.p(HOOK_PATH))
+        if new_conf["mode"] == "Integrated":
+            _remove(root.p(STOCK_HOOK_PATH))
+    except Exception as exc:
+        raise ApplyError(f"normalize failed: {exc}") from exc
+    return new_conf != conf
+
+
+def restore_hotplug(root):
+    try:
+        conf = read_conf(root)
+    except ConfError as exc:
+        raise ApplyError(str(exc)) from exc
+    # With "None" an Integrated boot no longer disables the dGPU in firmware, so the
+    # reset belongs to a mode that does not depend on it.
+    if conf["mode"] == "Integrated":
+        raise ApplyError("switch to Standard or Ultimate before restoring hotplug_type")
+    if conf.get("hotplug_type") == "None":
+        return False
+    path = root.p(CONF_PATH)
+    try:
+        _atomic_write(path, json.dumps({**conf, "hotplug_type": "None"}, indent=2).encode()
+                      + b"\n", stat.S_IMODE(os.stat(path).st_mode))
+    except Exception as exc:
+        raise ApplyError(f"restore-hotplug failed: {exc}") from exc
+    return True
+
+
+def _fallback_state(error):
+    return {
+        "version": 1, "active": "standard", "configured": "unknown", "inconsistent": False,
+        "pendingMode": None, "mux": None, "muxPendingReboot": False, "dgpuDisabled": None,
+        "externalConnected": [], "stockHookPresent": False, "helper": "missing",
+        "error": error,
+    }
+
+
+def main(argv):
+    if argv[:1] == ["state"]:
+        try:
+            result = state(Root("/"), runtime_mode(), Path(__file__).resolve())
+        except Exception as exc:
+            result = _fallback_state(f"state failed: {exc}")
+        print(json.dumps(result, separators=(",", ":")))
+        return 0
+    if argv[:1] == ["apply"] and len(argv) == 2 and argv[1] in MODES:
+        return _run_root(lambda: apply_mode(Root("/"), argv[1], reload=_daemon_reload))
+    root_only = {"normalize": normalize, "restore-hotplug": restore_hotplug}
+    if len(argv) == 1 and argv[0] in root_only:
+        # The only environment read, and it can only refuse: these belong to the sudo
+        # install steps, never to the polkit action (pkexec sets PKEXEC_UID).
+        if "PKEXEC_UID" in os.environ:
+            print(f"gpu-mode: {argv[0]} is not available through pkexec", file=sys.stderr)
+            return 2
+        return _run_root(lambda: root_only[argv[0]](Root("/")))
+    print("usage: gpu-mode state | apply <eco|standard|ultimate> | normalize | restore-hotplug",
+          file=sys.stderr)
+    return 2
+
+
+def _daemon_reload():
+    try:
+        subprocess.run(["/usr/bin/systemctl", "daemon-reload"], check=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ApplyError(f"systemctl daemon-reload failed: {exc}") from exc
+
+
+def _run_root(action):
+    # pkexec keeps the caller's umask, and directories created here hold root-run files.
+    os.umask(0o022)
+    if os.geteuid() != 0:
+        print("gpu-mode: must run as root", file=sys.stderr)
+        return 1
+    try:
+        action()
+    except Exception as exc:
+        print(f"gpu-mode: {exc}".splitlines()[0], file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

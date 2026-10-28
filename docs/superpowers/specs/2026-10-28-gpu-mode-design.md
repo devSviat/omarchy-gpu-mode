@@ -1,6 +1,6 @@
 # GPU Mode for Omarchy — Design
 
-Date: 2026-10-28 · Author: devSviat · Status: approved 2026-10-28 · local only, not published
+Date: 2026-10-28 · Author: devSviat · Status: approved 2026-10-28 · hardware-tested and published 2026-10-28
 
 ## Why
 
@@ -37,7 +37,7 @@ Several catalog plugins expose GPU modes as part of larger ASUS control centres.
 - A machine that boots to a black screen or hangs because of a half-applied switch.
 - Two writers for the same state: the plugin and `supergfxd` both writing `/etc/supergfxd.conf`, or `asusd` and the plugin both driving the GPU attributes.
 - A switch that is written but not followed by a reboot, leaving the config describing a mode that is not running.
-- Turning the dGPU off live while Hyprland still holds it (see "Sleep hook").
+- Turning the dGPU off live while Hyprland still holds it (see "Eco power-off").
 - `pkexec` on a file the user can write.
 
 ## Context and facts (verified on this machine 2026-10-28)
@@ -47,12 +47,14 @@ Several catalog plugins expose GPU modes as part of larger ASUS control centres.
 - **The external outputs `HDMI-A-1` and `DP-1` (USB-C) are on card1, the NVIDIA card.** In Eco they do not work.
 - The internal panel is `eDP-2` on card2 in Hybrid and `eDP-1` on card1 in Ultimate.
 - MUX: `/sys/class/firmware-attributes/asus-armoury/attributes/gpu_mux_mode/current_value` (also `/sys/devices/platform/asus-nb-wmi/gpu_mux_mode`). `1` = Optimus (iGPU drives the panel), `0` = dGPU. The kernel exposes `pending_reboot`.
-- `dgpu_disable` exists and is `0`. The kernel refuses to set MUX = dGPU while `dgpu_disable=1`.
+- `dgpu_disable` exists (`asus-armoury/attributes/dgpu_disable/current_value`, also `/sys/devices/platform/asus-nb-wmi/dgpu_disable`). The kernel refuses to set MUX = dGPU while `dgpu_disable=1`.
+- `gpu_mux_mode/current_value` keeps reading the boot value after a write; `pending_reboot` stays `1` even after the old value is written back; writing the old value back before the reboot does cancel the switch.
+- In Eco with `hotplug_type: None` the firmware re-adds the NVIDIA GPU to the PCI bus on resume. The `nvidia` module is then loaded by something polling about every 2 s, and Hyprland hot-plugs the new DRM card within about 2 s. `rtcwake -m mem` bypasses systemd-sleep, so sleep hooks do not run in that test.
 - NVIDIA modules are in the initramfs: `/etc/mkinitcpio.conf.d/nvidia.conf` has `MODULES+=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)`.
 
 ### supergfxd 5.2.7 (read from source, tag `5.2.7`, gitlab.com/asus-linux/supergfxctl)
 - It is installed, enabled and running. Supported modes: `Integrated, Hybrid, AsusMuxDgpu`. Members of `wheel` may call it over D-Bus without root.
-- Config: `/etc/supergfxd.conf`, currently with `"hotplug_type": "None"`. It also currently says `"mode": "AsusMuxDgpu"` although the MUX is in Optimus. The boot safety check corrects the mode in memory only and never writes the file.
+- Config: `/etc/supergfxd.conf`, originally with `"hotplug_type": "None"`. It also currently says `"mode": "AsusMuxDgpu"` although the MUX is in Optimus. The boot safety check corrects the mode in memory only and never writes the file.
 - **The config lives in memory.** supergfxd rewrites the whole file only after one of its own mode changes completes (`config.write()` in `controller.rs`). A hand edit is therefore safe as long as nothing calls `supergfxctl -m` before the reboot.
 - Boot (`do_boot_tasks`): it reads the mode, then `asus_boot_safety_check`:
   - MUX = dGPU → the mode is forced to `AsusMuxDgpu`;
@@ -63,7 +65,9 @@ Several catalog plugins expose GPU modes as part of larger ASUS control centres.
 - Switch semantics of `supergfxctl -m`:
   - from `AsusMuxDgpu` to anything: it only flips the MUX and saves the mode. **One reboot, Ultimate → Eco included.**
   - `Hybrid ↔ Integrated` through `-m`: waits for logout and **stops display-manager**. This is why the stock Omarchy toggle edits the config file and reboots instead.
-- Kernel cmdline `supergfxd.mode=<Mode>` overrides the config at boot. It is the recovery hatch, set from the Limine menu.
+- `hotplug_type: "Asus"`: the Integrated boot actions end with `AsusDgpuDisable` (`dgpu_disable=1` after unbinding and removing the GPU). A Hybrid boot runs `AsusDgpuEnable` (`dgpu_disable=0`, PCI rescan) before loading drivers, but it only gets that far when `dgpu_disable` was already 0: while it is 1, the boot safety check below forces Integrated first. On wake from suspend (logind `PrepareForSleep` false) in Integrated it writes `dgpu_disable=1` again; the write is skipped when the value is already set.
+- The boot safety check with `hotplug_type: "Asus"`: MUX = dGPU and `dgpu_disable=1` → it clears `dgpu_disable` itself and uses `AsusMuxDgpu`; `dgpu_disable=1` and mode not `Integrated` → it **forces Integrated**. So leaving Eco must clear `dgpu_disable` before the reboot, or Standard silently boots as Eco.
+- Kernel cmdline `supergfxd.mode=<Mode>` overrides the config at boot, but it is no recovery hatch here: supergfxd persists it into the config (`reload()` writes it), with `"Asus"` and `dgpu_disable=1` the safety check still forces Integrated, and with MUX = dGPU any mode becomes `AsusMuxDgpu`. Recovery is from a TTY (see the README's "Recovery" and "Testing" below).
 
 ### Omarchy 4.0.6
 - Stock toggle: `/usr/bin/omarchy-toggle-hybrid-gpu`. For Integrated it:
@@ -78,7 +82,7 @@ Several catalog plugins expose GPU modes as part of larger ASUS control centres.
 - Hyprland env: Omarchy applies NVIDIA env vars only when an NVIDIA PCI display device exists. The user's `~/.config/hypr/hyprland.lua` sets `LIBVA_DRIVER_NAME=iHD` when `gpu_mux_mode=1`, which covers Eco too.
 - Plugin structure reference: the author's `sviat.nightlight` (`Service.qml` singleton, `Panel.qml`, `Model.js`, `bin/`, `install.sh`, `tests/`).
 
-- In Integrated, supergfxd's modprobe conf contains only `blacklist nvidia*` lines, with no `install … /bin/false`. A blacklist stops alias autoloading but not an explicit `modprobe`. So an initramfs rebuilt while in Eco (kernel update) still loads the explicit `MODULES+=(nvidia …)`, and supergfxd rewrites the conf when it boots into another mode. The plugin does not touch the modprobe conf or the initramfs. The Eco→Ultimate-after-kernel-update case is tested on the hardware, with `supergfxd.mode=` as the recovery.
+- In Integrated, supergfxd's modprobe conf contains only `blacklist nvidia*` lines, with no `install … /bin/false`. A blacklist stops alias autoloading but not an explicit `modprobe`. So an initramfs rebuilt while in Eco (kernel update) still loads the explicit `MODULES+=(nvidia …)`, and supergfxd rewrites the conf when it boots into another mode. The plugin does not touch the modprobe conf or the initramfs. The Eco→Ultimate-after-kernel-update case is tested on the hardware, with the TTY steps in "Recovery" as the fallback.
 
 ### Other machine-specific facts
 - asusd 6.5 can also write `dgpu_disable` and `gpu_mux_mode` (it queues them until reboot as `QueuedGpuValue`), and `/etc/asusd/asusd.ron` stores nothing GPU-related. The plugin never uses asusd for GPU mode.
@@ -95,6 +99,7 @@ Several catalog plugins expose GPU modes as part of larger ASUS control centres.
 - The monitor warning appears only if something is connected to a port Eco disables.
 - Privileged actions go through polkit, using the themed Omarchy agent.
 - The dGPU-awake-in-Standard problem is a separate later task.
+- 2026-10-28, after hardware testing: **Eco powers the dGPU off in firmware**, as G-Helper does, through supergfxd's `hotplug_type: "Asus"`. The plugin's own sleep hook is dropped. A pending switch is shown only from the plugin's marker, so a MUX flipped in the BIOS raises no banner. Revert uses the marker's boot mode when supergfxd is unreachable.
 
 ## Architecture
 
@@ -104,36 +109,51 @@ Omarchy menu row ──summon──▶ Panel.qml (window, variant B)
                                  │ on confirm: pkexec <root helper> <mode>
                                  ▼
                        root helper (root-owned, fixed path, polkit action)
-                       writes MUX + /etc/supergfxd.conf + Eco boot/sleep files
+                       writes dgpu_disable + MUX + /etc/supergfxd.conf + Eco drop-in
                                  │ success
                                  ▼
                        omarchy-system-reboot (run as the user, immediately)
 ```
 
 ### State the UI reads (all without root)
-- **Active mode:** `supergfxctl -g`, cross-checked against the live MUX value.
-- **MUX:** the current value, which the derivation trusts for "active" because the existing config can be stale (`AsusMuxDgpu` while the MUX is Optimus). The installer normalises that config once.
-- **Inconsistent state:** the configured mode or the kernel's `pending_reboot` disagrees with what is active. It happens only if a reboot after a switch did not take place, or someone edited the config by hand. The window then shows "A GPU switch is waiting for a reboot" with **Reboot now** and **Revert**; Revert is the helper called with the active mode. This is a recovery path, not a feature. Whether `current_value` shows a newly written MUX before the reboot is checked on the hardware.
+- **Active mode:** `supergfxctl -g` first (`Integrated` → Eco, `Hybrid` → Standard, `AsusMuxDgpu` → Ultimate), because it reports the mode the machine booted with while the MUX value may already show a written switch. When it fails or reports something else and a valid pending marker exists, the marker's boot mode is active, so Revert still targets the running mode. Otherwise the derivation falls back to the MUX: `0` → Ultimate; `1` → Eco if `dgpu_disable=1` or no NVIDIA device is visible, else Standard.
+- **Configured mode:** reported as information only. A MUX flipped in the BIOS makes supergfxd adapt at boot without writing the config, so a config that disagrees with the active mode is not a pending switch.
+- **Inconsistent state:** the root-owned marker `/run/omarchy-gpu-mode/pending` exists; nothing else. The helper writes the marker (the mode the current boot started in) on every switch away from that mode and removes it on a switch back; `/run` is cleared by the reboot. The kernel's `pending_reboot` is still reported but does not drive this state. It happens only if a reboot after a switch did not take place, or someone edited the config by hand. The window then shows "A GPU switch is waiting for a reboot" with **Reboot now** and **Revert**; Revert is the helper called with the active mode. This is a recovery path, not a feature. Whether `current_value` shows a newly written MUX before the reboot is checked on the hardware.
+- **Kept-in-Eco notice:** active Eco, configured Standard or Ultimate, `dgpu_disable=1` and no marker means supergfxd's boot check forced Integrated after a switch; a BIOS MUX flip cannot produce it. The window says "supergfxd kept Eco because the NVIDIA GPU is still disabled in firmware. Apply <Label> again."
+- **Pending banner:** ends with "Reboot before suspending.", because supergfxd re-disables the dGPU on resume while it still runs Eco.
+- **Stock hook notice:** shown when Omarchy's `force-igpu` exists and the active mode is Eco: it would run its Vfio switch against the firmware-disabled dGPU.
 - **Monitor warning:** shown when the target is Eco and any non-eDP connector of the NVIDIA DRM card (found by PCI vendor `0x10de`, not by card number) has `status = connected`.
 
 ### Root helper
 - One small script, installed root-owned at a fixed system path (for example `/usr/local/libexec/omarchy-gpu-mode/apply`). A polkit action names it with `org.freedesktop.policykit.exec.path` and carries a readable message ("Switch GPU mode"). The default is `auth_admin`.
-- It accepts exactly `<eco|standard|ultimate>` and rejects everything else. It reads no environment it does not need. It ships with its own copies of the files it installs; it does not read them from the user-writable plugin directory.
+- It accepts exactly these argument lists and rejects everything else:
+  - `state`: read-only, runs as the user without privileges;
+  - `apply <eco|standard|ultimate>`: root, the only command reachable through the polkit action;
+  - `normalize` and `restore-hotplug`: root, for the sudo install and remove steps only; both refuse when `PKEXEC_UID` is set.
+- It reads no environment except that `PKEXEC_UID` refusal. It ships with its own copies of the files it installs; it does not read them from the user-writable plugin directory.
 - Steps, all idempotent:
-  1. Compute the target config: `mode`, plus `vfio_enable: true` for Eco, matching the stock toggle.
-  2. If the target MUX differs from the current one, write `gpu_mux_mode`. Refuse to set MUX = dGPU while `dgpu_disable=1`.
-  3. Install the Eco-only boot and sleep files for Eco, and remove them for the other modes (see "Sleep hook").
-  4. Write `/etc/supergfxd.conf` atomically (temp file in the same directory, then rename), preserving all other keys.
-  5. Never call `supergfxctl -m`, so supergfxd cannot overwrite the file before the reboot.
-- On any failure it restores the previous config and MUX, and exits non-zero with a message the window can show.
+  1. Compute the target config: `mode`, and `hotplug_type: "Asus"` for every mode. `vfio_enable` is left as it is.
+  2. When leaving Eco (target not Eco and `dgpu_disable=1`), record it in `/run/omarchy-gpu-mode/dgpu-cleared`, then write `dgpu_disable=0`, armoury attribute first, WMI path as the fallback. No PCI rescan; the reboot follows. This comes before the MUX write because the kernel refuses MUX = dGPU while `dgpu_disable=1`.
+  3. If the target MUX differs from the current one, or `pending_reboot` is set, write `gpu_mux_mode`.
+  4. On a revert to Eco in the boot that cleared `dgpu_disable` (the record exists), write `dgpu_disable=1` back after the MUX and drop the record, but only when no NVIDIA PCI function is present. Otherwise keep the pending marker, so the window still asks for a reboot; left at 0, supergfxd would write 1 on the next resume under a possibly bound driver.
+  5. Remove the old plugin sleep hook if present. Install the Eco drop-in and remove the stock `force-igpu` for Eco; remove the drop-in for the other modes (see "Eco power-off").
+  6. Write `/etc/supergfxd.conf` atomically (temp file in the same directory, then rename), preserving all other keys.
+  7. Never call `supergfxctl -m`, so supergfxd cannot overwrite the file before the reboot.
+- **Safety rule:** root never writes `dgpu_disable=1` while any NVIDIA PCI function (vendor `0x10de`) is present; writing it hot-removes the GPU. A switch to Eco from Standard or Ultimate never writes it: supergfxd does at the Eco boot.
+- On any failure it restores the previous config, the `/run` files, and the attributes in reverse write order, and exits non-zero with a message the window can show. Restores are decided by what was written, never by readback, because the attributes keep reading the boot value. Restoring `dgpu_disable=1` follows the safety rule: with an NVIDIA function present it stays 0 and the message says "the NVIDIA GPU stays enabled until the next Eco boot".
+- `normalize` (root install only, refused under `PKEXEC_UID`) sets `hotplug_type: "Asus"` in the existing config, corrects a stale `AsusMuxDgpu` with MUX = Optimus to `Hybrid`, then removes the old plugin sleep hook, and removes the stock `force-igpu` when the config is `Integrated`.
+- `restore-hotplug` (root only, refused under `PKEXEC_UID` and in Eco) sets `hotplug_type: "None"`, keeping the other keys and the file mode. `install-root.sh --remove` runs it before removing the helper.
 - The writes happen at switch time, the same as the stock toggle. The helper never reboots: the window runs `omarchy-system-reboot` as the user right after the helper succeeds. If the reboot cannot be scheduled, the window calls the helper with the active mode to revert, and shows the error.
 - Author's call, replacing the builder-check idea of a boot-time apply unit: without "apply later", the gap between the write and the reboot is seconds, so the extra unit and the pending file are not worth their complexity. The residual risk is a supergfxd crash-restart inside those seconds, which would run the new mode's boot actions live. It is accepted.
 
-### Sleep hook
-- The stock `force-igpu` hook keys off the config. The plugin uses its own sleep hook with the same Vfio→Integrated logic, plus a guard: act only when the **active** mode is `Integrated` and the config agrees. The plugin removes the stock `force-igpu` when it installs its own, so there is exactly one hook; the window shows a notice if the stock one reappears (for example via a migration).
-- Whether the G16 needs this hook at all (the G14 wakes in Hybrid after suspend) is unknown; finding out is part of hardware testing.
-- Stock `omarchy-toggle-hybrid-gpu` stays callable from the CLI and is not guarded against. The menu row no longer reaches it, running it by hand is a deliberate choice, and with immediate reboots there is no pending state for it to conflict with.
-- The `delay-start.conf` drop-in is installed for Eco and removed otherwise.
+### Eco power-off
+- Eco relies on the firmware: with `hotplug_type: "Asus"`, supergfxd writes `dgpu_disable=1` at the Integrated boot, after unbinding and removing the GPU, and its wake handler writes it again after each resume. The firmware is expected to keep the GPU off the PCI bus across suspend; this is still to be verified on the hardware.
+- The earlier design used a sleep hook adapted from Omarchy's `force-igpu` (Vfio→Integrated after resume). It was dropped on 2026-10-28: on resume the firmware re-adds the GPU, the `nvidia` module loads and Hyprland opens the new DRM card within about 2 s, so the hook cannot unload a driver Hyprland holds, and supergfxd's `kill -9` of `/dev/nvidia0` holders is unreliable and dangerous here.
+- The helper and `normalize` remove the old hook file `/usr/lib/systemd/system-sleep/omarchy-gpu-mode-igpu` left by the earlier version.
+- The stock `force-igpu` is removed on a switch to Eco, and the window shows a notice if it reappears in Eco (for example via a migration).
+- Stock `omarchy-toggle-hybrid-gpu` stays callable from the CLI and is not guarded against. The menu row no longer reaches it, running it by hand is a deliberate choice, and with immediate reboots there is no pending state for it to conflict with. It cannot leave Eco while `hotplug_type` is `"Asus"`: it does not clear `dgpu_disable`, so the boot safety check forces Integrated again. GPU Mode's uninstall resets `hotplug_type` to `"None"` for that reason.
+- The `delay-start.conf` drop-in, which Omarchy installs to avoid an Integrated boot race, is installed for Eco and removed otherwise.
+- Removal (`install-root.sh --remove`, `install.sh --remove`) refuses while the config is in Eco, since the dGPU stays disabled in firmware.
 
 ### Panel (variant B)
 - A `panel` plugin opened by `omarchy-shell shell summon sviat.gpu-mode '{}'`.
@@ -150,8 +170,8 @@ Omarchy menu row ──summon──▶ Panel.qml (window, variant B)
 
 ### Menu integration
 - Plugins cannot add menu rows, so `bin/` ships an installer/remover for `~/.config/omarchy/extensions/omarchy-menu.jsonc`, following `ReidenXerx/omarchy-dgpu-status`'s `dgpu-status-menu-install`.
-- The stock gate `when: omarchy-hw-hybrid-gpu` (checks that `supergfxctl -s` lists Hybrid) is kept. In 5.2.7 `get_supported_modes` always starts with `[Integrated, Hybrid]`; it returns `[Integrated]` only when the dGPU vendor is unknown **and** `dgpu_disable` is absent, and `dgpu_disable` exists here. So the row stays visible in Eco and Ultimate. Confirm on the hardware.
-- It writes a marked block that redefines `trigger.hardware.hybrid-gpu` in full: icon, label "GPU Mode", `when: omarchy-hw-hybrid-gpu`, and an action that summons the panel.
+- The stock gate `when: omarchy-hw-hybrid-gpu` (it greps `supergfxctl -s` for Hybrid) is NOT reused: on the hardware (2026-10-28) supergfxd booted in Ultimate lists only `[AsusMuxDgpu]`, which hid the row. The row's own gate: `/usr/bin/supergfxctl` is executable and a MUX attribute exists (asus-armoury or asus-nb-wmi `gpu_mux_mode`).
+- It writes a marked block that redefines `trigger.hardware.hybrid-gpu` in full: icon, label "GPU Mode", the gate above as `when`, and an action that summons the panel.
 - It preserves the rest of the file, comments included, and backs up before writing. Remove restores the stock row.
 
 ### Optional bar widget
@@ -160,21 +180,23 @@ Omarchy menu row ──summon──▶ Panel.qml (window, variant B)
 
 ## Installation
 
-- **Local only until it is tested on the hardware.** No GitHub remote, no push, no catalog submission. Publishing is a separate later decision.
+- The repository stayed local until the hardware test passed (docs/notes/2026-10-28-hardware-test.md), then was published.
 - Author's call, so that publishing later costs nothing: UI strings, code comments and the README are in English, and nothing personal is hard-coded. Machine facts (the NVIDIA card, MUX path, eDP name) are detected at runtime, not written as constants.
 
 - Plugin files: `~/.config/omarchy/plugins/sviat.gpu-mode`, as a link to `~/Projects/omarchy-gpu-mode`, the same setup as nightlight.
-- One-time root install: the helper, the polkit action, the sleep hook template and the drop-in template. There is no passwordless sudo on this machine, so the user runs this step from a printed command.
-- The root install also normalises the current stale `/etc/supergfxd.conf` mode to match the MUX.
+- One-time root install: the helper and the polkit action; the helper carries the drop-in template. There is no passwordless sudo on this machine, so the user runs this step from a printed command.
+- The root install also normalises `/etc/supergfxd.conf`: `hotplug_type: "Asus"` and a stale mode corrected to match the MUX.
 - The menu row is added by the user-level installer.
-- Uninstall reverses both and restores the stock menu row.
+- The root install ends with "Reboot to finish (Eco uses the new firmware power-off from the next boot)."
+- Uninstall reverses both, resets `hotplug_type` to `"None"`, and restores the stock menu row.
 
 ## Testing
 
-- Unit tests (Model.js / helper): the mode↔config↔MUX mapping, the active/inconsistent derivation (including the stale-config case), argument validation, config rewriting that preserves unknown keys, and monitor detection from a fake sysfs tree.
+- Unit tests (Model.js / helper): the mode↔config↔MUX mapping, the active/inconsistent derivation (a BIOS MUX flip with no marker is consistent; the marker names the active mode when supergfxd is unreachable), `dgpu_disable` written to 0 before the MUX when leaving Eco, and to 1 only on a revert to Eco in the boot that cleared it and only when no NVIDIA function is present, its rollback, removal of the old hook, `normalize` setting `hotplug_type`, the revert-to-Eco re-disable with and without an NVIDIA function, the safety rule in rollback, the kept-in-Eco notice, `restore-hotplug` and the removal on a fake root, argument validation, config rewriting that preserves unknown keys, and monitor detection from a fake sysfs tree.
 - Hardware matrix on the G16, each run checked after the reboot with `supergfxctl -g`, `gpu_mux_mode` and the dGPU PCI presence:
   - all 6 transitions;
-  - Eco: brightness on AC and on battery, suspend and resume;
+  - Eco: brightness on AC and on battery; suspend and resume with `sudo rtcwake -m no -s 60 && systemctl suspend` (`rtcwake -m mem` bypasses logind and with it supergfxd's wake handler), checking that the dGPU stays off the PCI bus and `dgpu_disable` reads `1`;
+  - leaving Eco for Standard and for Ultimate lands in that mode, not back in Eco;
   - the inconsistent-state banner (simulate a switch without a reboot), and Revert from it;
   - the monitor warning with HDMI connected and disconnected;
   - polkit cancel; helper failure (a simulated write error) leaves the old state intact.
@@ -185,11 +207,13 @@ Omarchy menu row ──summon──▶ Panel.qml (window, variant B)
   - Browser hardware video decode works (iHD) with a picture.
   - The dGPU sleeps when idle. The driver reports `Runtime D3 status: Enabled (fine-grained)` and power control is `auto`, yet on 2026-10-28 `runtime_status` stayed `active`: Hyprland, Xwayland, zed-editor and voxtype-osd held `/dev/dri/card1`, `renderD128` or `/dev/nvidia*`. Record the holders and `runtime_status` on AC and on battery, with and without an external monitor. This is the expected failure and the input for the follow-up.
   - nvidia-powerd: asusd stops it on battery (`disable_nvidia_powerd_on_battery: true`). Note its state on AC.
-- Recovery documented in the README: add `supergfxd.mode=Hybrid` to the kernel cmdline from the Limine menu.
+- Recovery documented in the README, from a TTY:
+  - Ultimate stuck: `echo 1 | sudo tee /sys/class/firmware-attributes/asus-armoury/attributes/gpu_mux_mode/current_value`, or set the MUX to Optimus/Dynamic in the BIOS, then reboot.
+  - Eco stuck: `echo 0 | sudo tee /sys/class/firmware-attributes/asus-armoury/attributes/dgpu_disable/current_value` and/or set `"hotplug_type": "None"` in `/etc/supergfxd.conf` (with `None` the safety check clears `dgpu_disable` and boots Hybrid), then reboot.
+  - A kernel cmdline `supergfxd.mode=` is persisted into the config by supergfxd, so it is not a one-boot override.
 
 ## Left to the builder
 
 - File and module layout within the nightlight pattern; icons; exact UI copy (wording, not meaning).
 - The helper language (bash or something else), provided it meets the helper rules above.
-- How the sleep hook detects "active Integrated", provided it never acts on the config alone.
 - The polkit action id, message text and install paths.

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "sviat.gpu-mode",
+  "name": "GPU Mode",
+  "version": "0.1.0",
+  "author": "devSviat",
+  "license": "MIT",
+  "description": "Switch ASUS laptop GPU modes (Eco, Standard, Ultimate) through supergfxd, followed by a reboot.",
+  "kinds": [
+    "panel"
+  ],
+  "entryPoints": {
+    "panel": "Panel.qml"
+  }
+}

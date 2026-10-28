@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN" "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>omarchy-gpu-mode</vendor>
+  <action id="dev.sviat.gpu-mode.apply">
+    <description>Switch the GPU mode</description>
+    <message>Switch the GPU mode (applied after a reboot)</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/omarchy-gpu-mode/gpu-mode</annotate>
+  </action>
+</policyconfig>
