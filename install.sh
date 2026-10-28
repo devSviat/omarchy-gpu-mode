@@ -53,6 +53,8 @@ else
   echo "  plugin   $PLUGIN_DIR"
 fi
 
+# The shell caches manifests; a stale one would place the plugin on the bar.
+omarchy-shell shell rescanPlugins >/dev/null
 omarchy plugin enable "$PLUGIN_ID"
 "$REPO/bin/gpu-mode-menu" install
 
