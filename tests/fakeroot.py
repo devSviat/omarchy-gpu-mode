@@ -1,11 +1,23 @@
 import importlib.machinery
 import importlib.util
 import json
+import atexit
+import shutil
 import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 ARMOURY = "sys/class/firmware-attributes/asus-armoury/attributes"
+
+
+_dirs = []
+atexit.register(lambda: [shutil.rmtree(d, ignore_errors=True) for d in _dirs])
+
+
+def mkdtemp(prefix):
+    path = tempfile.mkdtemp(prefix=prefix)
+    _dirs.append(path)
+    return path
 
 
 def load_module():
@@ -26,7 +38,7 @@ def write(base, rel, text):
 
 def build(conf_mode="Hybrid", mux="1", dgpu_disable="0", pending="0", nvidia=True,
           connectors=None, conf_text=None):
-    base = tempfile.mkdtemp(prefix="gpumode-root-")
+    base = mkdtemp("gpumode-root-")
     if conf_text is None:
         conf_text = json.dumps({"mode": conf_mode})
     write(base, "etc/supergfxd.conf", conf_text)

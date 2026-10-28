@@ -4,7 +4,6 @@ Run with:  python3 -I tests/test_state.py
 """
 
 import sys
-import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -63,7 +62,7 @@ def test_sysfs_readers():
     assert gm.mux_pending(root) is True
     assert gm.dgpu_disabled(root) is True
     assert gm.read_conf(root) == {"mode": "Hybrid"}
-    bare = gm.Root(tempfile.mkdtemp(prefix="gpumode-empty-"))
+    bare = gm.Root(fakeroot.mkdtemp(prefix="gpumode-empty-"))
     assert gm.read_mux(bare) is None and gm.mux_path(bare) is None
     assert gm.mux_pending(bare) is False
     assert gm.dgpu_disabled(bare) is None
@@ -79,7 +78,7 @@ def test_state_without_supergfxctl():
 
 def test_state_reports_helper_status():
     root = gm.Root(fakeroot.build())
-    tmp = Path(tempfile.mkdtemp(prefix="gpumode-helper-"))
+    tmp = Path(fakeroot.mkdtemp(prefix="gpumode-helper-"))
     repo_file, installed = tmp / "repo", tmp / "installed"
     repo_file.write_bytes(b"one")
     assert gm.helper_status(repo_file, installed) == "missing"
@@ -87,7 +86,17 @@ def test_state_reports_helper_status():
     assert gm.helper_status(repo_file, installed) == "outdated"
     installed.write_bytes(b"one")
     assert gm.helper_status(repo_file, installed) == "current"
-    assert gm.state(root, "Hybrid", repo_file)["helper"] in ("missing", "outdated", "current")
+    repo_file.unlink()
+    assert gm.helper_status(repo_file, installed) == "outdated"
+    # state() looks for the installed helper under the fake root, where none exists
+    repo_file.write_bytes(b"one")
+    assert gm.state(root, "Hybrid", repo_file)["helper"] == "missing"
+    helper = Path(root.p(str(gm.INSTALLED_HELPER)))
+    helper.parent.mkdir(parents=True)
+    helper.write_bytes(b"one")
+    assert gm.state(root, "Hybrid", repo_file)["helper"] == "current"
+    helper.write_bytes(b"other")
+    assert gm.state(root, "Hybrid", repo_file)["helper"] == "outdated"
 
 
 def test_state_bad_conf():
@@ -96,6 +105,59 @@ def test_state_bad_conf():
     assert got["configured"] == "unknown" and got["error"], got
     root = gm.Root(fakeroot.build(conf_text="[1]"))
     assert gm.state(root, "Hybrid", Path("/x"))["error"]
+
+
+def test_non_string_mode_is_unknown_with_error():
+    for text in ('{"mode": []}', '{"mode": {}}', '{"mode": 3}', '{}'):
+        root = gm.Root(fakeroot.build(conf_text=text))
+        got = gm.state(root, "Hybrid", Path("/x"))
+        assert got["configured"] == "unknown" and got["error"], (text, got)
+
+
+def test_deeply_nested_conf_does_not_raise():
+    root = gm.Root(fakeroot.build(conf_text="[" * 100000 + "]" * 100000))
+    got = gm.state(root, "Hybrid", Path("/x"))
+    assert got["configured"] == "unknown" and got["error"], got
+
+
+def test_runtime_mode_failures_are_none():
+    assert gm.runtime_mode(timeout=0.2, cmd=["/usr/bin/sleep", "5"]) is None
+    assert gm.runtime_mode(cmd=["/usr/bin/false"]) is None
+    assert gm.runtime_mode(cmd=["/nonexistent/supergfxctl", "-g"]) is None
+    assert gm.runtime_mode(cmd=["/usr/bin/echo", "Hybrid"]) == "Hybrid"
+
+
+def test_main_state_prints_contract_json():
+    import contextlib
+    import io
+    import json
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = gm.main(["state"])
+    assert code == 0
+    out = buf.getvalue()
+    assert out.count("\n") == 1
+    assert set(json.loads(out)) == CONTRACT_KEYS, out
+
+
+def test_main_state_survives_internal_failure():
+    import contextlib
+    import io
+    import json
+    original = gm.state
+    gm.state = lambda *a: 1 / 0
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = gm.main(["state"])
+    finally:
+        gm.state = original
+    got = json.loads(buf.getvalue())
+    assert code == 0 and set(got) == CONTRACT_KEYS and got["error"], got
+
+
+CONTRACT_KEYS = {"version", "active", "configured", "inconsistent", "mux", "muxPendingReboot",
+                 "dgpuDisabled", "externalConnected", "stockHookPresent", "helper", "error"}
 
 
 if __name__ == "__main__":

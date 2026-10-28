@@ -41,10 +41,12 @@ def read_conf(root):
     path = root.p(CONF_PATH)
     try:
         data = json.loads(path.read_text())
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RecursionError) as exc:
         raise ConfError(f"cannot read {CONF_PATH}: {exc}") from exc
     if not isinstance(data, dict):
         raise ConfError(f"{CONF_PATH} is not a JSON object")
+    if not isinstance(data.get("mode"), str):
+        raise ConfError(f"{CONF_PATH} has no string 'mode'")
     return data
 
 
@@ -75,12 +77,19 @@ def nvidia_card(root):
     devices = root.p(PCI_DEVICES)
     if not devices.is_dir():
         return None
-    for dev in sorted(devices.iterdir()):
+    try:
+        entries = sorted(devices.iterdir())
+    except OSError:
+        return None
+    for dev in entries:
         if _read(dev / "vendor") != NVIDIA_VENDOR:
             continue
         if not (_read(dev / "class") or "").startswith("0x03"):
             continue
-        cards = sorted((dev / "drm").glob("card*")) if (dev / "drm").is_dir() else []
+        try:
+            cards = sorted((dev / "drm").glob("card*"))
+        except OSError:
+            continue
         cards = [c for c in cards if c.name[4:].isdigit()]
         if cards:
             return cards[0].name
@@ -92,7 +101,11 @@ def external_connected(root):
     if card is None:
         return []
     found = []
-    for entry in sorted(root.p(DRM_CLASS).glob(f"{card}-*")):
+    try:
+        entries = sorted(root.p(DRM_CLASS).glob(f"{card}-*"))
+    except OSError:
+        return []
+    for entry in entries:
         connector = entry.name[len(card) + 1:]
         if connector.startswith("eDP"):
             continue
@@ -101,12 +114,12 @@ def external_connected(root):
     return found
 
 
-def runtime_mode(timeout=3.0):
+def runtime_mode(timeout=3.0, cmd=(SUPERGFXCTL, "-g")):
     # A wedged supergfxd blocks its clients, so the call must be bounded.
     try:
-        done = subprocess.run([SUPERGFXCTL, "-g"], capture_output=True, text=True,
+        done = subprocess.run(list(cmd), capture_output=True, text=True,
                               timeout=timeout)
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return None
     if done.returncode != 0:
         return None
@@ -134,7 +147,11 @@ def helper_status(repo_file, installed):
         installed_bytes = Path(installed).read_bytes()
     except OSError:
         return "missing"
-    return "current" if installed_bytes == Path(repo_file).read_bytes() else "outdated"
+    try:
+        repo_bytes = Path(repo_file).read_bytes()
+    except OSError:
+        return "outdated"
+    return "current" if installed_bytes == repo_bytes else "outdated"
 
 
 def state(root, runtime, repo_file):
@@ -159,9 +176,21 @@ def state(root, runtime, repo_file):
     }
 
 
+def _fallback_state(error):
+    return {
+        "version": 1, "active": "standard", "configured": "unknown", "inconsistent": False,
+        "mux": None, "muxPendingReboot": False, "dgpuDisabled": None,
+        "externalConnected": [], "stockHookPresent": False, "helper": "missing",
+        "error": error,
+    }
+
+
 def main(argv):
     if argv[:1] == ["state"]:
-        result = state(Root("/"), runtime_mode(), Path(__file__).resolve())
+        try:
+            result = state(Root("/"), runtime_mode(), Path(__file__).resolve())
+        except Exception as exc:
+            result = _fallback_state(f"state failed: {exc}")
         print(json.dumps(result, separators=(",", ":")))
         return 0
     print("usage: gpu-mode state", file=sys.stderr)
