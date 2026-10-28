@@ -15,32 +15,43 @@ Item {
 
   property bool opened: false
   property bool busy: false
-  property var state: null
+  property var gpuState: null
   property string selected: "standard"
   property string message: ""
-  property string pendingMode: ""
-  property bool reverting: false
+  property bool rebootScheduled: false
+  property string phase: ""
+  property string revertTarget: ""
 
   readonly property string repoDir: {
     var path = String(Qt.resolvedUrl(".")).replace(/^file:\/\//, "").replace(/\/+$/, "")
     try { return decodeURIComponent(path) } catch (e) { return path }
   }
-  readonly property var view: state ? Model.viewFor(state, selected, repoDir) : null
+  readonly property var view: gpuState ? Model.viewFor(gpuState, selected, repoDir) : null
   readonly property bool inconsistent: view !== null && view.banner === "inconsistent"
-  readonly property string notice: state ? Model.noticeFor(state, repoDir) : ""
+  readonly property string notice: gpuState ? Model.noticeFor(gpuState, repoDir) : ""
   readonly property bool canPrimary: !busy && view !== null && (inconsistent || view.canApply)
-  readonly property string statusLine: message !== "" ? message : (view ? view.bannerText : "")
+  readonly property string bannerText: view ? view.bannerText : ""
   readonly property string fontFamily: Style.font.family
 
-  function open(payloadJson) {
-    root.message = ""
-    root.busy = false
-    root.reverting = false
-    root.opened = true
-    loadState()
+  function focusKeys() {
     Qt.callLater(function() {
       if (root.opened) keyCatcher.forceActiveFocus()
     })
+  }
+
+  function open(payloadJson) {
+    if (helperProc.running || rebootProc.running) {
+      root.opened = true
+      focusKeys()
+      return
+    }
+    root.message = ""
+    root.rebootScheduled = false
+    root.phase = ""
+    root.busy = false
+    root.opened = true
+    loadState()
+    focusKeys()
   }
 
   function close() {
@@ -61,13 +72,14 @@ Item {
   }
 
   function applyState(raw) {
+    if (root.busy) return
     var parsed = Model.parseState(raw)
     if (parsed === null) {
-      root.state = null
+      root.gpuState = null
       root.message = "Could not read the GPU state."
       return
     }
-    root.state = parsed
+    root.gpuState = parsed
     root.selected = parsed.active
   }
 
@@ -78,12 +90,11 @@ Item {
     root.selected = ids[Math.max(0, Math.min(ids.length - 1, index + dx))]
   }
 
-  function runHelper(mode, isRevert) {
+  function runHelper(mode, nextPhase) {
     if (!Model.applyGuard(root.busy)) return
     root.busy = true
     root.message = ""
-    root.pendingMode = mode
-    root.reverting = isRevert
+    root.phase = nextPhase
     helperProc.stderrText = ""
     helperProc.exitCode = -1
     helperProc.streamDone = false
@@ -91,53 +102,79 @@ Item {
     helperProc.running = true
   }
 
-  function primaryAction() {
-    if (!root.canPrimary) return
-    if (root.inconsistent) startReboot()
-    else runHelper(root.selected, false)
-  }
-
-  function secondaryAction() {
-    if (root.busy) return
-    if (root.inconsistent) runHelper(root.state.active, true)
-    else dismiss()
-  }
-
-  function startReboot() {
+  function startReboot(nextPhase) {
     root.busy = true
     root.message = ""
+    root.phase = nextPhase
+    rebootProc.exitCode = -1
     rebootProc.command = ["/usr/bin/omarchy-system-reboot"]
     rebootProc.running = true
   }
 
+  function primaryAction() {
+    if (!root.canPrimary) return
+    if (root.inconsistent) {
+      startReboot("reboot-only")
+    } else {
+      root.revertTarget = root.gpuState.active
+      runHelper(root.selected, "apply")
+    }
+  }
+
+  function secondaryAction() {
+    if (root.busy) return
+    if (root.inconsistent) runHelper(root.gpuState.active, "revert-manual")
+    else dismiss()
+  }
+
   function helperFinished() {
     var result = Model.classifyHelperExit(helperProc.exitCode, helperProc.stderrText)
-    if (root.reverting) {
-      root.busy = false
-      root.reverting = false
-      root.message = result.kind === "ok"
-        ? "Could not schedule the reboot; the switch was reverted."
-        : (result.message || "Could not revert the switch.")
-      loadState()
-      return
-    }
-    if (result.kind === "ok") {
-      startReboot()
-      return
-    }
+    var finished = root.phase
     root.busy = false
-    if (result.kind === "error") root.message = result.message || "The GPU switch failed."
+    root.phase = ""
+    if (finished === "apply") {
+      if (result.kind === "ok") startReboot("reboot-after-apply")
+      else if (result.kind === "error") root.message = result.message || "The GPU switch failed."
+      return
+    }
+    if (finished === "revert-manual") {
+      if (result.kind === "ok") {
+        root.message = "The pending switch was reverted."
+        loadState()
+      } else if (result.kind === "error") {
+        root.message = result.message || "Could not revert the switch."
+      }
+      return
+    }
+    if (finished === "revert-after-reboot-failure") {
+      if (result.kind === "ok") {
+        root.message = "Could not schedule the reboot; the switch was reverted."
+        loadState()
+      } else {
+        root.message = "Could not schedule the reboot, and the revert failed: "
+          + (result.message || "authentication was dismissed")
+          + ". The new mode will apply at the next reboot."
+      }
+    }
   }
 
   function rebootFinished(code) {
-    if (code === 0) return
-    if (root.inconsistent || !root.state) {
-      root.busy = false
-      root.message = "Could not schedule the reboot."
+    var finished = root.phase
+    root.busy = false
+    root.phase = ""
+    if (code === 0) {
+      root.rebootScheduled = true
+      root.message = "Rebooting…"
       return
     }
+    if (finished === "reboot-after-apply") runHelper(root.revertTarget, "revert-after-reboot-failure")
+    else root.message = "Could not schedule the reboot."
+  }
+
+  function processStopped(failureMessage) {
     root.busy = false
-    runHelper(root.state.active, true)
+    root.phase = ""
+    root.message = failureMessage
   }
 
   Process {
@@ -147,7 +184,7 @@ Item {
       onStreamFinished: if (root.opened) root.applyState(text)
     }
     onExited: function(exitCode) {
-      if (root.opened && exitCode !== 0 && root.state === null)
+      if (root.opened && exitCode !== 0 && root.gpuState === null)
         root.message = "Could not read the GPU state."
     }
   }
@@ -170,11 +207,31 @@ Item {
       helperProc.exitCode = code
       if (helperProc.streamDone) root.helperFinished()
     }
+    onRunningChanged: {
+      if (running) return
+      root.focusKeys()
+      Qt.callLater(function() {
+        if (helperProc.exitCode < 0 && root.busy && root.phase !== "reboot-after-apply")
+          root.processStopped("Could not start the privileged helper.")
+      })
+    }
   }
 
   Process {
     id: rebootProc
-    onExited: function(code) { root.rebootFinished(code) }
+    property int exitCode: -1
+
+    onExited: function(code) {
+      rebootProc.exitCode = code
+      root.rebootFinished(code)
+    }
+    onRunningChanged: {
+      if (running) return
+      Qt.callLater(function() {
+        if (rebootProc.exitCode < 0 && root.busy && root.phase.indexOf("reboot") === 0)
+          root.processStopped("Could not run the reboot command.")
+      })
+    }
   }
 
   PanelWindow {
@@ -182,16 +239,17 @@ Item {
     anchors { top: true; bottom: true; left: true; right: true }
     color: "transparent"
     exclusionMode: ExclusionMode.Ignore
-    WlrLayershell.namespace: "sviat-gpu-mode"
+    WlrLayershell.namespace: "omarchy-keyboard-panel"
     WlrLayershell.layer: WlrLayer.Overlay
-    WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
+    WlrLayershell.keyboardFocus: helperProc.running ? WlrKeyboardFocus.None : WlrKeyboardFocus.Exclusive
 
     Rectangle {
       anchors.fill: parent
-      color: Util.alpha(Color.background, 0.7)
+      color: Color.menu.scrim
 
       MouseArea {
         anchors.fill: parent
+        // Hiding unloads this Item and kills in-flight helper processes.
         onClicked: if (!root.busy) root.dismiss()
       }
     }
@@ -199,18 +257,18 @@ Item {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      // Hiding unloads this Item and kills in-flight helper processes.
       onCloseRequested: if (!root.busy) root.dismiss()
       onMoveRequested: function(dx, dy) { root.moveSelection(dx) }
       onReturnRequested: root.primaryAction()
 
-      Rectangle {
+      BorderSurface {
         id: card
         anchors.centerIn: parent
         width: Math.min(Style.space(460), parent.width - Style.space(32))
         height: content.implicitHeight + Style.space(40)
         color: Color.popups.background
-        border.color: Color.popups.border
-        border.width: Style.normalBorderWidth
+        borderSpec: Border.surfaceSpec("popups", "border", Color.popups.border, Math.max(1, Style.space(2)))
         radius: Style.cornerRadius
 
         MouseArea { anchors.fill: parent; onClicked: {} }
@@ -253,7 +311,7 @@ Item {
                 id: modeItem
                 required property string modelData
                 readonly property var info: Model.modeInfo(modelData)
-                readonly property bool current: root.state !== null && root.state.active === modelData
+                readonly property bool current: root.gpuState !== null && root.gpuState.active === modelData
                 Layout.fillWidth: true
                 Layout.preferredWidth: 1
                 spacing: Style.space(4)
@@ -304,10 +362,21 @@ Item {
 
           Text {
             Layout.fillWidth: true
-            visible: root.statusLine !== ""
+            visible: root.bannerText !== ""
             textFormat: Text.PlainText
-            text: root.statusLine
+            text: root.bannerText
             color: Color.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.Wrap
+          }
+
+          Text {
+            Layout.fillWidth: true
+            visible: root.message !== ""
+            textFormat: Text.PlainText
+            text: root.message
+            color: root.rebootScheduled ? Color.popups.text : Color.urgent
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
             wrapMode: Text.Wrap
