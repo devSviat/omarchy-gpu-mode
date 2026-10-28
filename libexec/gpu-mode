@@ -286,11 +286,9 @@ class ApplyError(Exception):
 
 
 def target_config(conf, mode):
-    result = dict(conf)
-    result["mode"] = MODES[mode]
-    if mode == "eco":
-        result["vfio_enable"] = True
-    return result
+    # With "Asus", supergfxd sets dgpu_disable=1 at an Integrated boot and after every
+    # resume, and clears it at a Hybrid boot; AsusMuxDgpu does not use it.
+    return {**conf, "mode": MODES[mode], "hotplug_type": "Asus"}
 
 
 def _atomic_write(path, data, mode):
@@ -337,7 +335,7 @@ def _restore_file(path, saved):
         _atomic_write(path, saved[1], saved[2])
 
 
-def _write_mux(path, value):
+def _write_attr(path, value):
     with open(path, "w") as handle:
         handle.write(value)
 
@@ -378,8 +376,9 @@ def apply_mode(root, mode, reload=lambda: None, owner_uid=0, runtime=runtime_mod
     mux_file = mux_path(root)
     if mux_file is None:
         raise ApplyError("MUX attribute not found")
-    if mode == "ultimate" and dgpu_disabled(root) is True:
-        raise ApplyError("the dGPU is disabled; the kernel refuses MUX = dGPU")
+    # The kernel refuses MUX = dGPU while dgpu_disable=1, and supergfxd forces Integrated
+    # at boot while it is set. Eco never writes 1 live: the running session uses the GPU.
+    dgpu_file = dgpu_path(root) if mode != "eco" and dgpu_disabled(root) is True else None
 
     # The marker keeps the mode this boot started in, so a second switch before
     # the reboot still compares against it; /run is cleared by the reboot.
@@ -395,21 +394,25 @@ def apply_mode(root, mode, reload=lambda: None, owner_uid=0, runtime=runtime_mod
     new_conf = json.dumps(target_config(conf, mode), indent=2).encode() + b"\n"
     try:
         saved_mux = mux_file.read_bytes()
+        saved_dgpu = dgpu_file.read_bytes() if dgpu_file else None
         saved_files = {p: _snapshot_file(p)
                        for p in (conf_file, hook_file, dropin_file, stock_file, marker_file)}
     except OSError as exc:
         raise ApplyError(f"cannot snapshot state: {exc}") from exc
 
-    mux_written = False
+    mux_written = dgpu_written = False
     try:
         if mode == boot_mode:
             _remove(marker_file)
         else:
             _install(marker_file, f"{boot_mode}\n".encode(), 0o644, owner_uid)
+        if dgpu_file:
+            dgpu_written = True
+            _write_attr(dgpu_file, "0")
         # current_value may not reflect a write before the reboot, so pending_reboot also forces the write.
         if read_mux(root) != want_mux or mux_pending(root):
             mux_written = True
-            _write_mux(mux_file, str(want_mux))
+            _write_attr(mux_file, str(want_mux))
         if mode == "eco":
             _install(hook_file, HOOK_SOURCE.encode(), 0o755, owner_uid)
             _install(dropin_file, DROPIN_SOURCE.encode(), 0o644, owner_uid)
@@ -425,7 +428,9 @@ def apply_mode(root, mode, reload=lambda: None, owner_uid=0, runtime=runtime_mod
         dropin_dirty = _snapshot_file(dropin_file) != saved_files[dropin_file]
         steps = []
         if mux_written:
-            steps.append(lambda: _write_mux(mux_file, saved_mux.decode()))
+            steps.append(lambda: _write_attr(mux_file, saved_mux.decode()))
+        if dgpu_written:
+            steps.append(lambda: _write_attr(dgpu_file, saved_dgpu.decode()))
         for path, saved in saved_files.items():
             steps.append(lambda path=path, saved=saved: (
                 _snapshot_file(path) != saved and _restore_file(path, saved)))
