@@ -8,6 +8,25 @@
 
 set -euo pipefail
 
+usage() {
+  awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; started = 1; next } started { exit }' "${BASH_SOURCE[0]}"
+}
+
+conf_is_integrated() {
+  /usr/bin/python3 -I -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        sys.exit(0 if json.load(f).get("mode") == "Integrated" else 1)
+except Exception:
+    sys.exit(1)
+' "$1"
+}
+
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
+
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HELPER_DIR="/usr/local/libexec/omarchy-gpu-mode"
 HELPER="$HELPER_DIR/gpu-mode"
@@ -21,7 +40,7 @@ while (( $# > 0 )); do
   case "$1" in
   --remove) remove="true" ;;
   -h | --help)
-    sed -n '3,6p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
+    usage
     exit 0
     ;;
   *)
@@ -38,12 +57,19 @@ if (( EUID != 0 )); then
 fi
 
 if [[ "$remove" == "true" ]]; then
+  if conf_is_integrated /etc/supergfxd.conf; then
+    echo "GPU Mode: switch to Standard or Ultimate before removing (Eco needs the sleep hook)." >&2
+    exit 1
+  fi
   rm -f "$HELPER" "$POLICY" "$HOOK"
   rmdir "$HELPER_DIR" 2>/dev/null || true
   if [[ -e "$DROPIN" ]]; then
     rm -f "$DROPIN"
     rmdir "$(dirname "$DROPIN")" 2>/dev/null || true
-    systemctl daemon-reload
+    if ! systemctl daemon-reload; then
+      echo "GPU Mode: files removed, but systemctl daemon-reload failed; run it manually." >&2
+      exit 1
+    fi
   fi
   echo "Removed the GPU mode helper, policy, sleep hook and drop-in."
   exit 0

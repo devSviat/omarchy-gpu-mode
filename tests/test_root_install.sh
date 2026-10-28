@@ -35,6 +35,21 @@ refuses_without_root() {
   [[ $rc -ne 0 && -n "$out" ]]
 }
 unknown_option_rejected() { [[ -f $SCRIPT ]] && ! bash "$SCRIPT" --bogus; }
+help_mentions_remove() { bash "$SCRIPT" --help | grep -q -- '--remove'; }
+integrated_conf_detected() (
+  local d f
+  d="$(mktemp -d)"
+  printf '{"mode":"Integrated"}' >"$d/a"
+  printf '{"mode":"Hybrid"}' >"$d/b"
+  printf 'garbage' >"$d/c"
+  # shellcheck disable=SC1090
+  source "$SCRIPT"
+  conf_is_integrated "$d/a" && ! conf_is_integrated "$d/b" &&
+    ! conf_is_integrated "$d/c" && ! conf_is_integrated "$d/missing"
+  f=$?
+  rm -rf "$d"
+  return $f
+)
 shellcheck_clean() {
   command -v shellcheck >/dev/null || return 0
   shellcheck "$SCRIPT"
@@ -46,6 +61,8 @@ check "policy action id" policy_action_id
 check "policy defaults" policy_defaults
 check "install-root.sh refuses without root" refuses_without_root
 check "install-root.sh rejects unknown option" unknown_option_rejected
+check "--help mentions --remove" help_mentions_remove
+check "Integrated conf detection" integrated_conf_detected
 check "shellcheck (skipped if absent)" shellcheck_clean
 
 exit "$failed"
