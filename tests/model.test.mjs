@@ -62,10 +62,12 @@ test("viewFor shows helper banners", () => {
 test("viewFor inconsistent", () => {
   const v = M.viewFor(state({ inconsistent: true }), "eco", REPO)
   assert.equal(v.banner, "inconsistent")
-  assert.equal(v.bannerText, "A GPU switch is waiting for a reboot.")
+  assert.equal(v.bannerText, "A GPU switch is waiting for a reboot. Reboot before suspending.")
   assert.equal(v.canApply, false)
   const p = M.viewFor(state({ inconsistent: true, pendingMode: "ultimate" }), "eco", REPO)
-  assert.equal(p.bannerText, "A switch to Ultimate is waiting for a reboot.")
+  assert.equal(p.bannerText, "A switch to Ultimate is waiting for a reboot. Reboot before suspending.")
+  const s = M.viewFor(state({ inconsistent: true, pendingMode: "standard" }), "eco", REPO)
+  assert.equal(s.bannerText, "A switch to Standard is waiting for a reboot. Reboot before suspending.")
 })
 
 test("viewFor error banner", () => {
@@ -116,4 +118,19 @@ test("classifyHelperExit: 126 is dismissed, 127 is an error", () => {
 test("applyGuard blocks a second apply while busy", () => {
   assert.equal(M.applyGuard(true), false)
   assert.equal(M.applyGuard(false), true)
+})
+
+test("noticeFor a switch that supergfxd kept in Eco", () => {
+  const kept = { active: "eco", dgpuDisabled: true, inconsistent: false, pendingMode: null }
+  assert.equal(M.noticeFor(state({ ...kept, configured: "standard" }), REPO),
+    "supergfxd kept Eco because the NVIDIA GPU is still disabled in firmware. Apply Standard again.")
+  assert.equal(M.noticeFor(state({ ...kept, configured: "ultimate" }), REPO),
+    "supergfxd kept Eco because the NVIDIA GPU is still disabled in firmware. Apply Ultimate again.")
+  assert.equal(M.noticeFor(state({ ...kept, configured: "ultimate", stockHookPresent: true }), REPO),
+    "supergfxd kept Eco because the NVIDIA GPU is still disabled in firmware. Apply Ultimate again.")
+  assert.equal(M.noticeFor(state({ ...kept, configured: "eco" }), REPO), "")
+  assert.equal(M.noticeFor(state({ ...kept, configured: "unknown" }), REPO), "")
+  assert.equal(M.noticeFor(state({ ...kept, configured: "standard", dgpuDisabled: false }), REPO), "")
+  assert.equal(M.noticeFor(state({ ...kept, configured: "standard", inconsistent: true, pendingMode: "standard" }), REPO), "")
+  assert.equal(M.noticeFor(state({ ...kept, configured: "standard", active: "ultimate" }), REPO), "")
 })

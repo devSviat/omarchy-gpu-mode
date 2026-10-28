@@ -68,9 +68,10 @@ function viewFor(state, selected, repoDir) {
     } else if (state.inconsistent) {
         banner = "inconsistent"
         var pending = modeInfo(state.pendingMode)
-        bannerText = pending
+        // supergfxd re-disables the dGPU on resume in Eco, which would undo a switch out of it.
+        bannerText = (pending
             ? "A switch to " + pending.label + " is waiting for a reboot."
-            : "A GPU switch is waiting for a reboot."
+            : "A GPU switch is waiting for a reboot.") + " Reboot before suspending."
     }
 
     var external = state.externalConnected || []
@@ -90,6 +91,12 @@ function viewFor(state, selected, repoDir) {
 }
 
 function noticeFor(state, repoDir) {
+    // A BIOS MUX flip cannot leave dgpu_disable set, so this signature means supergfxd's
+    // boot check forced Integrated after a switch out of Eco.
+    var configured = state.configured === "eco" ? null : modeInfo(state.configured)
+    if (state.active === "eco" && configured && state.dgpuDisabled === true && !state.inconsistent)
+        return "supergfxd kept Eco because the NVIDIA GPU is still disabled in firmware. Apply "
+            + configured.label + " again."
     if (!state.stockHookPresent || state.active !== "eco")
         return ""
     return "Omarchy's force-igpu sleep hook is back and conflicts with GPU Mode's Eco. Run: "
