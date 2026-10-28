@@ -13,6 +13,7 @@ _BY_CONF = {conf: name for name, conf in MODES.items()}
 CONF_PATH = "/etc/supergfxd.conf"
 ARMOURY = "/sys/class/firmware-attributes/asus-armoury/attributes"
 WMI_MUX = "/sys/devices/platform/asus-nb-wmi/gpu_mux_mode"
+WMI_DGPU = "/sys/devices/platform/asus-nb-wmi/dgpu_disable"
 PCI_DEVICES = "/sys/bus/pci/devices"
 DRM_CLASS = "/sys/class/drm"
 SUPERGFXCTL = "/usr/bin/supergfxctl"
@@ -56,12 +57,20 @@ def read_conf(root):
     return data
 
 
-def mux_path(root):
-    for candidate in (f"{ARMOURY}/gpu_mux_mode/current_value", WMI_MUX):
+def _attr_path(root, armoury_name, wmi_path):
+    for candidate in (f"{ARMOURY}/{armoury_name}/current_value", wmi_path):
         path = root.p(candidate)
         if path.is_file():
             return path
     return None
+
+
+def mux_path(root):
+    return _attr_path(root, "gpu_mux_mode", WMI_MUX)
+
+
+def dgpu_path(root):
+    return _attr_path(root, "dgpu_disable", WMI_DGPU)
 
 
 def read_mux(root):
@@ -75,7 +84,8 @@ def mux_pending(root):
 
 
 def dgpu_disabled(root):
-    value = _read(root.p(f"{ARMOURY}/dgpu_disable/current_value"))
+    path = dgpu_path(root)
+    value = _read(path) if path else None
     return {"0": False, "1": True}.get(value)
 
 
@@ -132,14 +142,18 @@ def runtime_mode(timeout=3.0, cmd=(SUPERGFXCTL, "-g")):
     return done.stdout.strip() or None
 
 
-def derive_active(mux, runtime, nvidia_present):
+def derive_active(mux, runtime, nvidia_present, dgpu_off, marker):
     # supergfxd reports the mode it booted with, while the MUX value may already
-    # show a switch that waits for a reboot.
+    # show a switch that waits for a reboot; without supergfxd the marker holds that mode.
     if runtime in _BY_CONF:
         return _BY_CONF[runtime]
+    if marker in MODES:
+        return marker
     if mux == 0:
         return "ultimate"
-    return "standard" if nvidia_present else "eco"
+    if dgpu_off is True or not nvidia_present:
+        return "eco"
+    return "standard"
 
 
 def pending_marker(root):
@@ -147,16 +161,14 @@ def pending_marker(root):
     return value if value in MODES else None
 
 
-def derive_state(conf_mode, mux, runtime, nvidia_present, pending):
-    active = derive_active(mux, runtime, nvidia_present)
-    # supergfxd itself downgrades AsusMuxDgpu to Hybrid at boot when the MUX is in Optimus.
-    # A pending switch is a fresh write whose MUX change may not read back yet, not a stale config.
-    if conf_mode == "AsusMuxDgpu" and mux == 1 and not pending:
-        configured = "standard"
-    else:
-        configured = _BY_CONF.get(conf_mode, "unknown")
-    inconsistent = pending or (configured != "unknown" and configured != active)
-    return {"active": active, "configured": configured, "inconsistent": inconsistent}
+def derive_state(conf_mode, mux, runtime, nvidia_present, dgpu_off, marker):
+    # A MUX flipped in the BIOS makes supergfxd adapt at boot without rewriting its
+    # config, so a config that disagrees with the active mode is not a pending switch.
+    return {
+        "active": derive_active(mux, runtime, nvidia_present, dgpu_off, marker),
+        "configured": _BY_CONF.get(conf_mode, "unknown"),
+        "inconsistent": marker is not None,
+    }
 
 
 def helper_status(repo_file, installed):
@@ -179,8 +191,9 @@ def state(root, runtime, repo_file):
         conf_mode, error = None, str(exc)
     mux = read_mux(root)
     marker = pending_marker(root)
+    dgpu_off = dgpu_disabled(root)
     derived = derive_state(conf_mode, mux, runtime, nvidia_card(root) is not None,
-                           marker is not None)
+                           dgpu_off, marker)
     configured = derived["configured"]
     return {
         "version": 1,
@@ -188,7 +201,7 @@ def state(root, runtime, repo_file):
         "pendingMode": configured if marker is not None and configured in MODES else None,
         "mux": mux,
         "muxPendingReboot": mux_pending(root),
-        "dgpuDisabled": dgpu_disabled(root),
+        "dgpuDisabled": dgpu_off,
         "externalConnected": external_connected(root),
         "stockHookPresent": root.p(STOCK_HOOK_PATH).exists(),
         "ownHookPresent": root.p(HOOK_PATH).exists(),
@@ -371,7 +384,7 @@ def apply_mode(root, mode, reload=lambda: None, owner_uid=0, runtime=runtime_mod
     # The marker keeps the mode this boot started in, so a second switch before
     # the reboot still compares against it; /run is cleared by the reboot.
     boot_mode = pending_marker(root) or derive_active(
-        read_mux(root), runtime(), nvidia_card(root) is not None)
+        read_mux(root), runtime(), nvidia_card(root) is not None, dgpu_disabled(root), None)
 
     conf_file = root.p(CONF_PATH)
     hook_file = root.p(HOOK_PATH)

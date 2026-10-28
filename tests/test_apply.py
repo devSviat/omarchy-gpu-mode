@@ -379,6 +379,19 @@ def test_marker_records_boot_mode_and_clears():
     assert not marker(base).exists()
 
 
+def test_revert_without_supergfxd():
+    base = fakeroot.build(conf_mode="Hybrid", mux="1")
+    apply(base, "ultimate")
+    assert mux_file(base).read_text() == "0"
+    got = gm.state(gm.Root(base), None, Path("/x"))
+    assert got["active"] == "standard" and got["pendingMode"] == "ultimate", got
+    assert got["inconsistent"] is True
+    apply(base, got["active"])
+    assert not marker(base).exists()
+    assert mux_file(base).read_text() == "1"
+    assert json.loads(conf_file(base).read_text())["mode"] == "Hybrid"
+
+
 def test_marker_falls_back_to_runtime():
     base = fakeroot.build(conf_mode="Hybrid", mux="1")
     marker(base).parent.mkdir(parents=True)

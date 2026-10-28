@@ -22,24 +22,49 @@ CONNECTORS = {
 
 def test_derive_active():
     d = gm.derive_state
-    assert d("Hybrid", 1, "Hybrid", True, False)["active"] == "standard"
-    assert d("Integrated", 1, "Integrated", False, False)["active"] == "eco"
-    assert d("Hybrid", 0, "Hybrid", True, False)["active"] == "standard"
-    assert d("Hybrid", 0, "Integrated", True, False)["active"] == "eco"
+    assert d("Hybrid", 1, "Hybrid", True, False, None)["active"] == "standard"
+    assert d("Integrated", 1, "Integrated", False, True, None)["active"] == "eco"
+    assert d("Hybrid", 0, "Hybrid", True, False, None)["active"] == "standard"
+    assert d("Hybrid", 0, "Integrated", True, False, None)["active"] == "eco"
     for runtime in (None, "Vfio"):
-        assert d("Hybrid", 0, runtime, True, False)["active"] == "ultimate"
-        assert d("Hybrid", 1, runtime, False, False)["active"] == "eco"
-        assert d("Hybrid", 1, runtime, True, False)["active"] == "standard"
+        assert d("Hybrid", 0, runtime, True, False, None)["active"] == "ultimate"
+        assert d("Hybrid", 1, runtime, False, False, None)["active"] == "eco"
+        assert d("Hybrid", 1, runtime, True, True, None)["active"] == "eco"
+        assert d("Hybrid", 1, runtime, True, None, None)["active"] == "standard"
+        assert d("Hybrid", 1, runtime, True, False, None)["active"] == "standard"
+
+
+def test_marker_is_active_when_runtime_unknown():
+    d = gm.derive_state
+    for runtime in (None, "Vfio"):
+        assert d("AsusMuxDgpu", 0, runtime, True, False, "standard")["active"] == "standard"
+        assert d("Hybrid", 1, runtime, True, False, "ultimate")["active"] == "ultimate"
+        assert d("Hybrid", 1, runtime, True, False, "eco")["active"] == "eco"
+    assert d("AsusMuxDgpu", 0, "Hybrid", True, False, "eco")["active"] == "standard"
 
 
 def test_runtime_wins_over_written_mux():
-    got = gm.derive_state("Hybrid", 1, "AsusMuxDgpu", True, True)
+    got = gm.derive_state("Hybrid", 1, "AsusMuxDgpu", True, False, "ultimate")
     assert got["active"] == "ultimate" and got["inconsistent"] is True, got
 
 
 def test_pending_ultimate_is_not_treated_as_stale():
-    got = gm.derive_state("AsusMuxDgpu", 1, "Hybrid", True, True)
+    got = gm.derive_state("AsusMuxDgpu", 1, "Hybrid", True, False, "standard")
     assert got == {"active": "standard", "configured": "ultimate", "inconsistent": True}, got
+
+
+def test_bios_mux_flip_is_consistent():
+    got = gm.derive_state("Integrated", 0, "AsusMuxDgpu", True, False, None)
+    assert got == {"active": "ultimate", "configured": "eco", "inconsistent": False}, got
+    got = gm.derive_state("AsusMuxDgpu", 1, "Hybrid", True, False, None)
+    assert got == {"active": "standard", "configured": "ultimate", "inconsistent": False}, got
+
+
+def test_bios_mux_flip_state_has_no_banner():
+    base = fakeroot.build(conf_mode="Integrated", mux="0")
+    got = gm.state(gm.Root(base), "AsusMuxDgpu", Path("/x"))
+    assert got["active"] == "ultimate" and got["inconsistent"] is False, got
+    assert got["configured"] == "eco" and got["pendingMode"] is None, got
 
 
 def test_marker_drives_inconsistent_not_pending_reboot():
@@ -55,7 +80,8 @@ def test_marker_drives_inconsistent_not_pending_reboot():
     assert got["pendingMode"] == "ultimate" and got["active"] == "standard", got
     fakeroot.write(base, gm.PENDING_MARKER.lstrip("/"), "bogus\n")
     got = gm.state(root, "Hybrid", Path("/x"))
-    assert got["pendingMode"] is None and got["configured"] == "standard", got
+    assert got["pendingMode"] is None and got["configured"] == "ultimate", got
+    assert got["inconsistent"] is False
 
 
 def test_hook_presence():
@@ -68,21 +94,16 @@ def test_hook_presence():
     assert got["ownHookPresent"] is True and got["stockHookPresent"] is True
 
 
-def test_stale_conf_is_consistent():
-    got = gm.derive_state("AsusMuxDgpu", 1, "Hybrid", True, False)
-    assert got == {"active": "standard", "configured": "standard", "inconsistent": False}, got
-
-
-def test_unrebooted_switch_is_inconsistent():
-    assert gm.derive_state("Integrated", 1, "Hybrid", True, False)["inconsistent"] is True
+def test_only_the_marker_makes_it_inconsistent():
     for conf in ("Hybrid", "Integrated", "AsusMuxDgpu", None):
-        assert gm.derive_state(conf, 1, "Hybrid", True, True)["inconsistent"] is True
+        assert gm.derive_state(conf, 1, "Hybrid", True, False, None)["inconsistent"] is False
+        assert gm.derive_state(conf, 1, "Hybrid", True, False, "eco")["inconsistent"] is True
 
 
 def test_unknown_conf():
-    got = gm.derive_state(None, 1, "Hybrid", True, False)
+    got = gm.derive_state(None, 1, "Hybrid", True, False, None)
     assert got["configured"] == "unknown" and got["inconsistent"] is False, got
-    assert gm.derive_state("Vfio", 1, "Hybrid", True, False)["configured"] == "unknown"
+    assert gm.derive_state("Vfio", 1, "Hybrid", True, False, None)["configured"] == "unknown"
 
 
 def test_external_connected():
@@ -104,6 +125,24 @@ def test_sysfs_readers():
     assert gm.read_mux(bare) is None and gm.mux_path(bare) is None
     assert gm.mux_pending(bare) is False
     assert gm.dgpu_disabled(bare) is None
+
+
+def test_dgpu_disable_falls_back_to_wmi():
+    base = fakeroot.mkdtemp(prefix="gpumode-wmi-")
+    fakeroot.write(base, "sys/devices/platform/asus-nb-wmi/dgpu_disable", "1\n")
+    root = gm.Root(base)
+    assert gm.dgpu_disabled(root) is True
+    assert gm.dgpu_path(root) == root.p(gm.WMI_DGPU)
+    base = fakeroot.build(dgpu_disable="0")
+    fakeroot.write(base, "sys/devices/platform/asus-nb-wmi/dgpu_disable", "1\n")
+    root = gm.Root(base)
+    assert gm.dgpu_disabled(root) is False
+    assert gm.dgpu_path(root) == root.p(gm.ARMOURY + "/dgpu_disable/current_value")
+
+
+def test_state_firmware_disabled_without_runtime_is_eco():
+    root = gm.Root(fakeroot.build(conf_mode="Integrated", dgpu_disable="1"))
+    assert gm.state(root, None, Path("/x"))["active"] == "eco"
 
 
 def test_state_without_supergfxctl():
