@@ -387,13 +387,13 @@ def apply_mode(root, mode, reload=lambda: None, owner_uid=0, runtime=runtime_mod
     except OSError as exc:
         raise ApplyError(f"cannot snapshot state: {exc}") from exc
 
-    # current_value may not reflect a write before the reboot, so pending_reboot also forces the write.
     mux_written = False
     try:
         if mode == boot_mode:
             _remove(marker_file)
         else:
             _install(marker_file, f"{boot_mode}\n".encode(), 0o644, owner_uid)
+        # current_value may not reflect a write before the reboot, so pending_reboot also forces the write.
         if read_mux(root) != want_mux or mux_pending(root):
             mux_written = True
             _write_mux(mux_file, str(want_mux))
