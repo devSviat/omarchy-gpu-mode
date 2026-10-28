@@ -535,6 +535,41 @@ def test_revert_to_eco_rolled_back():
     assert marker(base).read_text() == "eco\n" and cleared(base).is_file()
 
 
+def test_revert_rollback_trusts_the_record_over_a_lying_readback():
+    base = fakeroot.build(conf_mode="Integrated", mux="1", dgpu_disable="1", nvidia=False)
+    apply(base, "standard", runtime=lambda: "Integrated")
+    dgpu_file(base).write_text("1\n")
+    writes = recording_writes(
+        lambda: fail_conf_write_once(lambda: apply(base, "eco", runtime=lambda: "Integrated")))
+    assert [v for name, v in writes if name == "dgpu_disable"] == ["1", "0"], writes
+    assert marker(base).read_text() == "eco\n" and cleared(base).is_file()
+
+
+def test_revert_refused_when_the_gpu_appears_before_the_write():
+    base = fakeroot.build(conf_mode="Integrated", mux="1", dgpu_disable="1", nvidia=False)
+    apply(base, "standard", runtime=lambda: "Integrated")
+    original = gm.nvidia_function_present
+    calls = {"n": 0}
+
+    def appears(root):
+        calls["n"] += 1
+        return calls["n"] > 1
+
+    gm.nvidia_function_present = appears
+    try:
+        writes = recording_writes(lambda: apply(base, "eco", runtime=lambda: "Integrated"))
+        raise AssertionError(f"no error {writes}")
+    except gm.ApplyError as exc:
+        msg = str(exc)
+    finally:
+        gm.nvidia_function_present = original
+    assert "the NVIDIA GPU is present; reboot to finish leaving Eco" in msg, msg
+    assert "rollback failed" not in msg and "stays enabled" not in msg, msg
+    assert dgpu_file(base).read_text() == "0"
+    assert marker(base).read_text() == "eco\n" and cleared(base).is_file()
+    assert json.loads(conf_file(base).read_text())["mode"] == "Hybrid"
+
+
 def test_dgpu_disable_is_never_written_with_an_nvidia_function_present():
     base = fakeroot.build(nvidia=False)
     fakeroot.write(base, "sys/bus/pci/devices/0000:01:00.1/vendor", "0x10de\n")

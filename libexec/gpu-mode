@@ -288,10 +288,14 @@ def _write_attr(path, value):
         handle.write(value)
 
 
+class DgpuRefused(ApplyError):
+    pass
+
+
 def _write_dgpu(root, path, value):
     # dgpu_disable=1 hot-removes the GPU, which is unsafe while a driver may be bound to it.
     if value.strip() == "1" and nvidia_function_present(root):
-        raise ApplyError("refusing dgpu_disable=1 while an NVIDIA PCI function is present")
+        raise DgpuRefused("refusing dgpu_disable=1 while an NVIDIA PCI function is present")
     _write_attr(path, value)
 
 
@@ -358,7 +362,7 @@ def apply_mode(root, mode, reload=lambda: None, owner_uid=0, runtime=runtime_mod
     new_conf = json.dumps(target_config(conf, mode), indent=2).encode() + b"\n"
     try:
         saved_mux = mux_file.read_bytes()
-        saved_dgpu = dgpu_file.read_bytes() if clear_dgpu or redisable else None
+        saved_dgpu = dgpu_file.read_bytes() if clear_dgpu else None
         saved_files = {p: _snapshot_file(p) for p in
                        (conf_file, hook_file, dropin_file, stock_file, marker_file, cleared_file)}
     except OSError as exc:
@@ -372,15 +376,19 @@ def apply_mode(root, mode, reload=lambda: None, owner_uid=0, runtime=runtime_mod
             _install(marker_file, f"{boot_mode}\n".encode(), 0o644, owner_uid)
         if clear_dgpu:
             _install(cleared_file, b"1\n", 0o644, owner_uid)
-            written.append((dgpu_file, saved_dgpu))
             _write_dgpu(root, dgpu_file, "0")
+            written.append((dgpu_file, saved_dgpu))
         # current_value may not reflect a write before the reboot, so pending_reboot also forces the write.
         if read_mux(root) != want_mux or mux_pending(root):
             written.append((mux_file, saved_mux))
             _write_attr(mux_file, str(want_mux))
         if redisable:
-            written.append((dgpu_file, saved_dgpu))
-            _write_dgpu(root, dgpu_file, "1")
+            try:
+                _write_dgpu(root, dgpu_file, "1")
+            except DgpuRefused as exc:
+                raise ApplyError("the NVIDIA GPU is present; reboot to finish leaving Eco") from exc
+            # The record proves this boot wrote 0; the readback may still show the boot value.
+            written.append((dgpu_file, b"0"))
             _remove(cleared_file)
         _remove(hook_file)
         if mode == "eco":

@@ -126,7 +126,11 @@ Omarchy menu row ──summon──▶ Panel.qml (window, variant B)
 
 ### Root helper
 - One small script, installed root-owned at a fixed system path (for example `/usr/local/libexec/omarchy-gpu-mode/apply`). A polkit action names it with `org.freedesktop.policykit.exec.path` and carries a readable message ("Switch GPU mode"). The default is `auth_admin`.
-- It accepts exactly `<eco|standard|ultimate>` and rejects everything else. It reads no environment it does not need. It ships with its own copies of the files it installs; it does not read them from the user-writable plugin directory.
+- It accepts exactly these argument lists and rejects everything else:
+  - `state`: read-only, runs as the user without privileges;
+  - `apply <eco|standard|ultimate>`: root, the only command reachable through the polkit action;
+  - `normalize` and `restore-hotplug`: root, for the sudo install and remove steps only; both refuse when `PKEXEC_UID` is set.
+- It reads no environment except that `PKEXEC_UID` refusal. It ships with its own copies of the files it installs; it does not read them from the user-writable plugin directory.
 - Steps, all idempotent:
   1. Compute the target config: `mode`, and `hotplug_type: "Asus"` for every mode. `vfio_enable` is left as it is.
   2. When leaving Eco (target not Eco and `dgpu_disable=1`), record it in `/run/omarchy-gpu-mode/dgpu-cleared`, then write `dgpu_disable=0`, armoury attribute first, WMI path as the fallback. No PCI rescan; the reboot follows. This comes before the MUX write because the kernel refuses MUX = dGPU while `dgpu_disable=1`.
@@ -188,7 +192,7 @@ Omarchy menu row ──summon──▶ Panel.qml (window, variant B)
 
 ## Testing
 
-- Unit tests (Model.js / helper): the mode↔config↔MUX mapping, the active/inconsistent derivation (a BIOS MUX flip with no marker is consistent; the marker names the active mode when supergfxd is unreachable), `dgpu_disable` written before the MUX when leaving Eco and never written in Eco, its rollback, removal of the old hook, `normalize` setting `hotplug_type`, the revert-to-Eco re-disable with and without an NVIDIA function, the safety rule in rollback, the kept-in-Eco notice, `restore-hotplug` and the removal on a fake root, argument validation, config rewriting that preserves unknown keys, and monitor detection from a fake sysfs tree.
+- Unit tests (Model.js / helper): the mode↔config↔MUX mapping, the active/inconsistent derivation (a BIOS MUX flip with no marker is consistent; the marker names the active mode when supergfxd is unreachable), `dgpu_disable` written to 0 before the MUX when leaving Eco, and to 1 only on a revert to Eco in the boot that cleared it and only when no NVIDIA function is present, its rollback, removal of the old hook, `normalize` setting `hotplug_type`, the revert-to-Eco re-disable with and without an NVIDIA function, the safety rule in rollback, the kept-in-Eco notice, `restore-hotplug` and the removal on a fake root, argument validation, config rewriting that preserves unknown keys, and monitor detection from a fake sysfs tree.
 - Hardware matrix on the G16, each run checked after the reboot with `supergfxctl -g`, `gpu_mux_mode` and the dGPU PCI presence:
   - all 6 transitions;
   - Eco: brightness on AC and on battery; suspend and resume with `sudo rtcwake -m no -s 60 && systemctl suspend` (`rtcwake -m mem` bypasses logind and with it supergfxd's wake handler), checking that the dGPU stays off the PCI bus and `dgpu_disable` reads `1`;
