@@ -27,13 +27,14 @@ Earlier versions used a sleep hook that switched to Vfio and back to Integrated 
 ## Tested on
 
 - ASUS ROG Zephyrus G16 GU603ZV (Intel iGPU + RTX 4060 Laptop), Omarchy 4.0.6, kernel 7.2.8, supergfxctl 5.2.7, nvidia-open 615.78. All six transitions, each with one reboot, and suspend in Eco: see [docs/notes/2026-10-28-hardware-test.md](docs/notes/2026-10-28-hardware-test.md).
+- Same laptop, Omarchy 4.5.0, kernel 7.2.15, supergfxctl 5.2.7, nvidia-open 615.78 (2026-11-27): Standard to Ultimate with one password prompt and one reboot.
 
 Other ASUS models with a MUX should behave the same through `supergfxd`, but are untested. The plugin changes firmware GPU settings; read the recovery section before the first switch.
 
 ## Requirements
 
 - An ASUS laptop with a MUX switch, `supergfxd` running, and your user in `wheel`.
-- Omarchy 4.0.6 or newer.
+- Omarchy 4.5 or newer (0.1.1 and earlier target 4.0.x).
 
 ## Install
 
