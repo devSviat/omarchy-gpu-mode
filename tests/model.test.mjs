@@ -1,5 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
+import { accessSync, constants, existsSync } from "node:fs"
 import { loadModel } from "./load-model.mjs"
 
 const M = loadModel()
@@ -133,4 +134,12 @@ test("noticeFor a switch that supergfxd kept in Eco", () => {
   assert.equal(M.noticeFor(state({ ...kept, configured: "standard", dgpuDisabled: false }), REPO), "")
   assert.equal(M.noticeFor(state({ ...kept, configured: "standard", inconsistent: true, pendingMode: "standard" }), REPO), "")
   assert.equal(M.noticeFor(state({ ...kept, configured: "standard", active: "ultimate" }), REPO), "")
+})
+
+test("reboot goes through omarchy-system, which Omarchy 4.5 kept", () => {
+  assert.deepEqual(Array.from(M.rebootCommand), ["/usr/bin/omarchy-system", "reboot"])
+})
+
+test("reboot command exists on this Omarchy install", { skip: !existsSync("/usr/bin/omarchy") }, () => {
+  accessSync(M.rebootCommand[0], constants.X_OK)
 })
