@@ -5,8 +5,8 @@
   gpu-mode-menu remove  [--file PATH]
 
 Plugins cannot register menu rows, so the row is a marked block in the user's
-extensions file. It redefines the stock Hybrid GPU row, which replaces that
-row whole while the block is present.
+extensions file. Omarchy 4.5 splits the stock Hybrid GPU row into -on and -off:
+the block turns -on into GPU Mode, keeping its place in the menu, and hides -off.
 """
 
 import argparse
@@ -27,11 +27,13 @@ GATE = (
     "[ -e /sys/devices/platform/asus-nb-wmi/gpu_mux_mode ]; }"
 )
 ROW = (
-    '  "trigger.hardware.hybrid-gpu": {"icon":"","label":"GPU Mode",'
+    '  "trigger.hardware.hybrid-gpu-on": {"icon":"","label":"GPU Mode",'
     f'"when":"{GATE}",'
     '"action":"omarchy-shell shell summon sviat.gpu-mode \'{}\'"},'
 )
-BLOCK = [BEGIN, ROW, END]
+# The stock toggle rewrites supergfxd.conf without knowing about hotplug_type "Asus".
+HIDDEN = '  "trigger.hardware.hybrid-gpu-off": {"icon":"","label":"GPU Mode","when":"false","action":"true"},'
+BLOCK = [BEGIN, ROW, HIDDEN, END]
 
 
 def find_block(lines):

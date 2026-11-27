@@ -12,6 +12,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 TOOL = ROOT / "bin" / "gpu-mode-menu"
+ROW_ID = "trigger.hardware.hybrid-gpu-on"
+HIDDEN_ID = "trigger.hardware.hybrid-gpu-off"
+BLOCK_IDS = [ROW_ID, HIDDEN_ID]
 
 TEMPLATE = """{
   // Extend the Quickshell Omarchy menu with JSONC.
@@ -55,8 +58,8 @@ def test_install_into_template():
         r = run("install", p)
         assert r.returncode == 0, r.stderr
         data = strip_jsonc(p.read_text())
-        assert list(data) == ["trigger.hardware.hybrid-gpu"], data
-        row = data["trigger.hardware.hybrid-gpu"]
+        assert list(data) == BLOCK_IDS, data
+        row = data[ROW_ID]
         assert row["label"] == "GPU Mode"
         assert "omarchy-hw-hybrid-gpu" not in row["when"]
         assert "/usr/bin/supergfxctl" in row["when"] and "gpu_mux_mode" in row["when"]
@@ -64,6 +67,9 @@ def test_install_into_template():
         assert gate.returncode in (0, 1), gate
         assert row["action"] == "omarchy-shell shell summon sviat.gpu-mode '{}'"
         assert row["icon"]
+        hidden = data[HIDDEN_ID]
+        assert subprocess.run(["/bin/bash", "-c", hidden["when"]]).returncode != 0
+        assert "omarchy-toggle-hybrid-gpu" not in hidden["action"]
 
 
 def test_install_idempotent():
@@ -91,7 +97,7 @@ def test_preserves_user_entries():
     with d:
         run("install", p)
         data = strip_jsonc(p.read_text())
-        assert set(data) == {"personal.notes", "trigger.hardware.hybrid-gpu"}
+        assert set(data) == {"personal.notes", *BLOCK_IDS}
         run("remove", p)
         assert set(strip_jsonc(p.read_text())) == {"personal.notes"}
 
@@ -109,7 +115,7 @@ def test_missing_file_created():
     d, p = tmpfile(None)
     with d:
         assert run("install", p).returncode == 0
-        assert list(strip_jsonc(p.read_text())) == ["trigger.hardware.hybrid-gpu"]
+        assert list(strip_jsonc(p.read_text())) == BLOCK_IDS
         assert not list(p.parent.glob("*.bak"))
         assert run("remove", p).returncode == 0
         assert strip_jsonc(p.read_text()) == {}
@@ -151,7 +157,7 @@ def test_crlf_roundtrip():
         assert run("install", p).returncode == 0
         installed = p.read_bytes()
         assert installed.count(b"\n") == installed.count(b"\r\n")
-        assert list(strip_jsonc(installed.decode())) == ["trigger.hardware.hybrid-gpu"]
+        assert list(strip_jsonc(installed.decode())) == BLOCK_IDS
         assert run("remove", p).returncode == 0
         assert p.read_bytes() == original
 
@@ -172,7 +178,7 @@ def test_opener_not_on_first_line():
     d, p = tmpfile(original)
     with d:
         assert run("install", p).returncode == 0
-        assert list(strip_jsonc(p.read_text())) == ["trigger.hardware.hybrid-gpu"]
+        assert list(strip_jsonc(p.read_text())) == BLOCK_IDS
         run("remove", p)
         assert p.read_text() == original
 
@@ -192,7 +198,7 @@ def test_empty_file_like_missing():
     d, p = tmpfile("")
     with d:
         assert run("install", p).returncode == 0
-        assert list(strip_jsonc(p.read_text())) == ["trigger.hardware.hybrid-gpu"]
+        assert list(strip_jsonc(p.read_text())) == BLOCK_IDS
         assert not list(p.parent.glob("*.bak"))
 
 
