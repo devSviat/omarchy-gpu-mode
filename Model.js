@@ -2,6 +2,10 @@
 
 var modeIds = ["eco", "standard", "ultimate"]
 
+// Omarchy 4.5 dropped /usr/bin/omarchy-system-reboot; omarchy-system hands the
+// reboot to systemd-run and returns at once, so exit 0 means it is scheduled.
+var rebootCommand = ["/usr/bin/omarchy-system", "reboot"]
+
 var MODES = {
     eco: {
         id: "eco",

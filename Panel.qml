@@ -121,7 +121,7 @@ Item {
     say("")
     root.phase = nextPhase
     rebootProc.exitCode = -1
-    rebootProc.command = ["/usr/bin/omarchy-system-reboot"]
+    rebootProc.command = Model.rebootCommand
     rebootProc.running = true
   }
 
