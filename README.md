@@ -61,7 +61,7 @@ The checkout is writable by your user, so anything running as you can change it.
 
 The root step never changes the GPU mode. It sets `"hotplug_type": "Asus"` in `/etc/supergfxd.conf`, normalises a stale `mode` so that it matches the MUX, and removes the old GPU Mode sleep hook. In Eco it also removes Omarchy's `force-igpu` sleep hook, which conflicts with the firmware-disabled dGPU. If that normalisation fails, the helper and polkit action stay installed; fix the reported problem and run the root step again, or remove it with `--remove`.
 
-The menu row replaces the stock "Hybrid GPU" row. The installer edits `~/.config/omarchy/extensions/omarchy-menu.jsonc` between `// >>> sviat.gpu-mode` and `// <<< sviat.gpu-mode` markers, and writes a timestamped `.bak` next to the file before each change. A `trigger.hardware.hybrid-gpu` entry of your own placed later in that file overrides the GPU Mode row.
+The menu row replaces the stock GPU rows. Since Omarchy 4.5 the stock row is split into "Switch to Hybrid GPU" (`trigger.hardware.hybrid-gpu-on`) and "Switch to Integrated GPU" (`trigger.hardware.hybrid-gpu-off`): the block turns the first into GPU Mode and hides the second, so the stock `omarchy-toggle-hybrid-gpu` is not reachable from the menu. The installer edits `~/.config/omarchy/extensions/omarchy-menu.jsonc` between `// >>> sviat.gpu-mode` and `// <<< sviat.gpu-mode` markers, and writes a timestamped `.bak` next to the file before each change. Entries of your own for those two ids placed later in that file override the block. After upgrading from an Omarchy 4.0 install, run `./install.sh` again to rewrite the block with the new ids.
 
 ## Changes made in the BIOS
 
@@ -98,7 +98,7 @@ Do not use `supergfxd.mode=` on the kernel command line for this. `supergfxd` wr
    sudo ./install-root.sh --remove
    ```
 
-3. Remove the menu row (the stock "Hybrid GPU" row returns), disable the plugin and remove the link:
+3. Remove the menu row (the stock Hybrid/Integrated GPU rows return), disable the plugin and remove the link:
 
    ```
    ./install.sh --remove
@@ -111,7 +111,7 @@ Do not use `supergfxd.mode=` on the kernel command line for this. `supergfxd` wr
 To test suspend in Eco, use `sudo rtcwake -m no -s 60 && systemctl suspend`. `rtcwake -m mem` bypasses logind, so `supergfxd`'s wake handler does not run.
 
 ```
-python3 -I tests/test_state.py && python3 -I tests/test_apply.py && python3 -I tests/test_menu.py && node --test tests/ && bash tests/test_root_install.sh && bash tests/test_install.sh
+python3 -I tests/test_state.py && python3 -I tests/test_apply.py && python3 -I tests/test_menu.py && node --test 'tests/*.test.mjs' && bash tests/test_root_install.sh && bash tests/test_install.sh
 ```
 
 The plugin is not audited by third parties and makes no claims beyond its own tests.

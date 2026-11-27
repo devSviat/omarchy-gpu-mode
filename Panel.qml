@@ -4,6 +4,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -258,7 +259,7 @@ Item {
 
     Rectangle {
       anchors.fill: parent
-      color: Color.menu.scrim
+      color: Commons.Color.menu.scrim
 
       MouseArea {
         anchors.fill: parent
@@ -278,8 +279,8 @@ Item {
         anchors.centerIn: parent
         width: Math.min(Style.space(460), parent.width - Style.space(32))
         height: content.implicitHeight + Style.space(40)
-        color: Color.popups.background
-        borderSpec: Border.surfaceSpec("popups", "border", Color.popups.border, Math.max(1, Style.space(2)))
+        color: Commons.Color.popups.background
+        borderSpec: Border.surfaceSpec("popups", "border", Commons.Color.popups.border, Math.max(1, Style.space(2)))
         radius: Style.cornerRadius
 
         MouseArea { anchors.fill: parent; onClicked: {} }
@@ -294,8 +295,9 @@ Item {
             Layout.fillWidth: true
 
             Text {
+              textFormat: Text.PlainText
               text: "GPU Mode"
-              color: Color.popups.text
+              color: Commons.Color.popups.text
               font.family: root.fontFamily
               font.pixelSize: Style.font.title
               font.bold: true
@@ -305,7 +307,7 @@ Item {
             Text {
               textFormat: Text.PlainText
               text: root.view ? root.view.currentText : ""
-              color: Color.muted
+              color: Commons.Color.muted
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
             }
@@ -339,9 +341,10 @@ Item {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   Layout.fillWidth: true
                   text: modeItem.current ? "current" : modeItem.info.tag
-                  color: modeItem.current ? Color.accent : Color.muted
+                  color: modeItem.current ? Commons.Color.accent : Commons.Color.muted
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                   font.bold: modeItem.current
@@ -352,9 +355,10 @@ Item {
           }
 
           Text {
+            textFormat: Text.PlainText
             Layout.fillWidth: true
             text: Model.modeInfo(root.selected).description
-            color: Color.popups.text
+            color: Commons.Color.popups.text
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
             wrapMode: Text.Wrap
@@ -365,7 +369,7 @@ Item {
             visible: root.view !== null && root.view.showMonitorWarning
             textFormat: Text.PlainText
             text: root.view ? root.view.monitorText : ""
-            color: Color.urgent
+            color: Commons.Color.urgent
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
             wrapMode: Text.Wrap
@@ -376,7 +380,7 @@ Item {
             visible: root.bannerText !== ""
             textFormat: Text.PlainText
             text: root.bannerText
-            color: Color.urgent
+            color: Commons.Color.urgent
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
             wrapMode: Text.Wrap
@@ -387,7 +391,7 @@ Item {
             visible: root.message !== ""
             textFormat: Text.PlainText
             text: root.message
-            color: root.messageInfo ? Color.popups.text : Color.urgent
+            color: root.messageInfo ? Commons.Color.popups.text : Commons.Color.urgent
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
             wrapMode: Text.Wrap
@@ -398,7 +402,7 @@ Item {
             visible: root.notice !== ""
             textFormat: Text.PlainText
             text: root.notice
-            color: Color.muted
+            color: Commons.Color.muted
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
             wrapMode: Text.Wrap
